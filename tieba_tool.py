@@ -261,6 +261,7 @@ PAGE = r"""<!DOCTYPE html>
 :root{--bg:#0f1216;--surface:#171b21;--surface2:#1e242c;--border:#2a323c;--text:#e6eaef;
 --muted:#9aa4b2;--accent:#3b82f6;--ok:#22c55e;--err:#ef4444;--warn:#f59e0b;--r:10px}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{margin:0;font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
 background:var(--bg);color:var(--text);line-height:1.5}
 .top{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
@@ -476,13 +477,12 @@ $("#copy").onclick=async()=>{await navigator.clipboard.writeText(out.text);const
 $("#dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([out.text],{type:"text/plain;charset=utf-8"}));a.download=out.name;a.click();URL.revokeObjectURL(a.href)};
 
 async function init(){
-  if(!cred.bduss){                    // 浏览器没存过，尝试用服务端默认（secret.py / 环境变量）
-    try{
-      const d=await fetch("/api/defaults").then(r=>r.json());
-      if(d.bduss){cred.bduss=d.bduss;cred.stoken=d.stoken||"";
-        $("#bduss").value=cred.bduss;$("#stoken").value=cred.stoken;}
-    }catch(e){}
-  }
+  let def={bduss:"",stoken:""};       // 服务端默认（secret.py / 环境变量）
+  try{ def=await fetch("/api/defaults").then(r=>r.json()); }catch(e){}
+  cred.bduss=cred.bduss||def.bduss||"";      // localStorage 优先，缺的用默认补
+  cred.stoken=cred.stoken||def.stoken||"";
+  $("#bduss").value=cred.bduss;
+  $("#stoken").value=cred.stoken;
   if(cred.bduss) login();
 }
 init();
