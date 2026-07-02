@@ -6,7 +6,7 @@
 然后浏览器会自动打开 http://127.0.0.1:8000
 在页面顶部填一次 BDUSS（被删帖记录还需 STOKEN），即可使用。
 
-功能：主题帖爬取 / 用户回复查询 / 被删帖记录。
+功能：主题帖爬取 / 用户发言查询（回复+主题帖）/ 被删帖记录。
 封禁功能暂不提供。
 """
 
@@ -429,7 +429,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
 </header>
 <nav class="tabs">
   <button class="tab active" data-tab="thread">主题帖爬取</button>
-  <button class="tab" data-tab="user">用户回复查询</button>
+  <button class="tab" data-tab="user">用户发言查询</button>
   <button class="tab" data-tab="logs">被删帖记录</button>
 </nav>
 <main>
@@ -457,7 +457,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询记录</button>
     </form>
-    <p class="hint">需要 STOKEN，且当前账号为该吧吧务。</p>
+    <p class="hint">需要 STOKEN（.tieba.baidu.com 域）；吧名要带“吧”字（如 yy小说吧）；当前账号须为该吧吧务。</p>
   </section>
   <section class="results" id="results" hidden>
     <div class="rhead">
@@ -585,7 +585,7 @@ function renderThread(d){
 function renderUser(d){
   showResult({
     head:`<b>${esc(d.user.show_name)}</b> · 主页id ${d.user.tieba_uid}`,
-    items:d.replies, empty:"无内容（可能对方未公开，或主页 id 有误）",
+    items:d.replies, empty:"无内容：查“回复”为空可改选“主题帖”或“全部”；也可能对方未公开发言，或主页 id 有误。",
     match:r=>r.fname+" "+(r.text||"")+" "+(r.title||""),
     itemHTML:r=> r.kind==="thread"
       ? `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="spacer"></span><span>${esc(r.time)}</span><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">帖子 ↗</a></div><div class="rtext"><b>${esc(r.title)}</b></div><div class="stats">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
