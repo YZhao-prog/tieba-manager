@@ -121,6 +121,8 @@ async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, **_):
                 for r in group.objs:
                     replies.append({
                         "fname": fcache[fid],
+                        "tid": r.tid,
+                        "pid": r.pid,
                         "link": f"https://tieba.baidu.com/p/{r.tid}?pid={r.pid}&cid=0#{r.pid}",
                         "time": _fmt_time(r.create_time),
                         "text": r.text,
@@ -162,6 +164,37 @@ async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30
         return {"target": _name(user), "fname": fname, "logs": logs}
 
 
+async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, max_pages=50, **_):
+    """按需定位一条回复/楼中楼在第几楼、第几页，并给出可精确跳转的链接。
+
+    楼层号不在搜索类接口的返回里，只能回帖里逐页扫描匹配 pid，故设扫描上限。
+    """
+    if tid is None or pid is None:
+        raise ServiceError("缺少 tid/pid。")
+    tid, pid = int(tid), int(pid)
+    max_pages = min(int(max_pages), 50)  # 扫描上限，避免深帖跑太久
+    async with _client(bduss, stoken) as client:
+        pn = 1
+        while pn <= max_pages:
+            posts = _check(
+                await client.get_posts(tid, pn, rn=30, with_comments=True, comment_rn=10),
+                "定位楼层",
+            )
+            for post in posts.objs:
+                if not is_comment and post.pid == pid:
+                    return {"found": True, "floor": post.floor, "page": pn,
+                            "url": f"https://tieba.baidu.com/p/{tid}?pid={pid}&cid=0#{pid}"}
+                if is_comment:
+                    for cm in post.comments:
+                        if cm.pid == pid:
+                            return {"found": True, "floor": post.floor, "page": pn,
+                                    "url": f"https://tieba.baidu.com/p/{tid}?pid={post.pid}&cid={pid}#{pid}"}
+            if not posts.has_more:
+                break
+            pn += 1
+        return {"found": False, "scanned": pn}
+
+
 def load_defaults() -> dict:
     """默认凭证来源（优先级：环境变量 > 本地 secret.py）。
 
@@ -187,6 +220,7 @@ ROUTES = {
     "/api/thread": svc_thread,
     "/api/user-posts": svc_user,
     "/api/postlogs": svc_logs,
+    "/api/locate": svc_locate,
 }
 
 
@@ -318,6 +352,10 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .meta .spacer{flex:1 1 auto}
 .meta a{color:var(--accent);text-decoration:none;white-space:nowrap}.meta a:hover{text-decoration:underline}
 .chip{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:1px 8px;font-size:12px;color:var(--text)}
+.mini{background:none;border:1px solid var(--border);color:var(--muted);border-radius:5px;padding:1px 8px;font-size:11px;cursor:pointer;white-space:nowrap}
+.mini:hover{border-color:var(--accent);color:var(--text)}
+.mini:disabled{cursor:default;opacity:.7}
+.mini.hit{border-color:var(--accent);color:#cfe0ff}
 .tag{background:#1d3a63;color:#cfe0ff;border-radius:4px;padding:1px 6px;font-size:11px}
 .rtext{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin-top:6px;font-size:14px}
 .ltitle{font-weight:500;margin-top:6px}.ltext{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);margin-top:4px;font-size:13.5px}
@@ -467,6 +505,18 @@ function applyView(){
   if(shown>per){pager.hidden=false;$("#pageinfo").textContent=`第 ${page} / ${pages} 页`;$("#prev").disabled=page<=1;$("#next").disabled=page>=pages;}
   else pager.hidden=true;
 }
+// 「查楼层」按需定位（事件委托，#rbody 常驻）
+$("#rbody").addEventListener("click",async e=>{
+  const b=e.target.closest(".locbtn"); if(!b||b.dataset.done)return;
+  b.disabled=true; const old=b.textContent; b.textContent="查询中…";
+  try{
+    const res=await api("/api/locate",{tid:Number(b.dataset.tid),pid:Number(b.dataset.pid),is_comment:b.dataset.c==="1"});
+    if(res.found){
+      b.textContent=`第 ${res.floor} 楼 · 第 ${res.page} 页`; b.classList.add("hit"); b.dataset.done=1;
+      const a=b.parentElement.querySelector("a.orig"); if(a)a.href=res.url;
+    }else{ b.textContent="未定位到"; b.disabled=false; }
+  }catch(err){ b.textContent="查询失败"; b.disabled=false; }
+});
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
 $("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
@@ -490,7 +540,7 @@ function renderUser(d){
     head:`<b>${esc(d.user.show_name)}</b> · 主页id ${d.user.tieba_uid}`,
     items:d.replies, empty:"无回复（可能对方未公开回复，或主页 id 有误）",
     match:r=>r.fname+" "+r.text,
-    itemHTML:r=>`<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><a href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
+    itemHTML:r=>`<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><button class="mini locbtn" data-tid="${r.tid}" data-pid="${r.pid}" data-c="${r.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
   });
 }
 function renderLogs(d){
