@@ -16,12 +16,16 @@
 
 ## 使用
 
+推荐用虚拟环境（避免 Homebrew/系统 Python 的 PEP 668 限制）：
+
 ```bash
-pip3 install aiotieba      # 首次运行前装一次依赖
-python3 tieba_tool.py      # 启动，浏览器会自动打开
+cd tieba-manage
+python3 -m venv .venv                 # 首次：建虚拟环境
+./.venv/bin/pip install aiotieba      # 首次：装依赖
+./.venv/bin/python tieba_tool.py      # 启动，浏览器会自动打开
 ```
 
-浏览器打开后：
+以后每次只需最后一行。浏览器打开后：
 
 1. 右上角填入 **BDUSS**（被删帖记录还需 **STOKEN**），点「保存并登录」。
 2. 选功能标签，填参数，点按钮即可。
