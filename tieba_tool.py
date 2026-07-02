@@ -139,8 +139,15 @@ async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30
         user = _check(await client.tieba_uid2user_info(int(tieba_uid)), "解析用户")
         logs, pn = [], 1
         while pn <= max_pages:
-            res = _check(await client.get_bawu_postlogs(
-                fname, pn, search_value=user.user_name, search_type=BawuSearchType.USER), "获取吧务日志")
+            res = await client.get_bawu_postlogs(
+                fname, pn, search_value=user.user_name, search_type=BawuSearchType.USER)
+            if getattr(res, "err", None) is not None:
+                if "302" in str(res.err):
+                    raise ServiceError(
+                        "吧务日志鉴权失败（302）。请检查：①STOKEN 要用 .tieba.baidu.com 域下的那个；"
+                        "②贴吧名需带“吧”字（如「yy小说吧」）；③当前账号须是该吧吧务。"
+                    )
+                raise ServiceError(f"获取吧务日志失败：{res.err}")
             for x in res.objs:
                 logs.append({
                     "title": x.title, "text": x.text, "op_user": x.op_user_name,
