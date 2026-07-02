@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
@@ -154,6 +155,26 @@ async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30
         return {"target": _name(user), "fname": fname, "logs": logs}
 
 
+def load_defaults() -> dict:
+    """默认凭证来源（优先级：环境变量 > 本地 secret.py）。
+
+    secret.py 已在 .gitignore 中，不会被提交，可安全存放真实 BDUSS/STOKEN。
+    """
+    bduss = os.environ.get("TIEBA_BDUSS", "")
+    stoken = os.environ.get("TIEBA_STOKEN", "")
+    try:
+        import secret  # 本地、gitignore
+
+        bduss = bduss or getattr(secret, "BDUSS", "")
+        stoken = stoken or getattr(secret, "STOKEN", "")
+    except ImportError:
+        pass
+    return {"bduss": bduss.strip(), "stoken": stoken.strip()}
+
+
+DEFAULTS = load_defaults()
+
+
 ROUTES = {
     "/api/me": svc_me,
     "/api/thread": svc_thread,
@@ -181,6 +202,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
+        elif self.path == "/api/defaults":
+            self._send(200, json.dumps(DEFAULTS, ensure_ascii=False))
         else:
             self._send(404, "not found", "text/plain; charset=utf-8")
 
@@ -452,7 +475,17 @@ function showErr(m){const e=$("#error");e.textContent="出错了："+m;e.hidden=
 $("#copy").onclick=async()=>{await navigator.clipboard.writeText(out.text);const b=$("#copy"),o=b.textContent;b.textContent="已复制";setTimeout(()=>b.textContent=o,1200)};
 $("#dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([out.text],{type:"text/plain;charset=utf-8"}));a.download=out.name;a.click();URL.revokeObjectURL(a.href)};
 
-if(cred.bduss) login();
+async function init(){
+  if(!cred.bduss){                    // 浏览器没存过，尝试用服务端默认（secret.py / 环境变量）
+    try{
+      const d=await fetch("/api/defaults").then(r=>r.json());
+      if(d.bduss){cred.bduss=d.bduss;cred.stoken=d.stoken||"";
+        $("#bduss").value=cred.bduss;$("#stoken").value=cred.stoken;}
+    }catch(e){}
+  }
+  if(cred.bduss) login();
+}
+init();
 </script></body></html>"""
 
 

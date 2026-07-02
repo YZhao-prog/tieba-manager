@@ -1,5 +1,6 @@
 # 凭证，切勿提交
 .env
+secret.py
 
 # Python
 __pycache__/
