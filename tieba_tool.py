@@ -39,7 +39,7 @@ def _patch_aiotieba() -> None:
     except Exception:
         return
 
-    def _safe_from_xml(data_tag):
+    def _safe_media_from_xml(data_tag):
         img_item = data_tag.img
         if img_item is not None:
             src = img_item.get("original", "") or ""
@@ -51,7 +51,27 @@ def _patch_aiotieba() -> None:
         origin_src = data_tag.get("href", "") or ""
         return m.Media_postlog(src, origin_src, hash_)
 
-    m.Media_postlog.from_xml = staticmethod(_safe_from_xml)
+    m.Media_postlog.from_xml = staticmethod(_safe_media_from_xml)
+
+    _orig_page_from_xml = m.Page_postlog.from_xml
+
+    def _safe_page_from_xml(data_soup):
+        # 无记录时页面缺 breadcrumbs / 分页 div，原实现会崩；兜底返回空页。
+        try:
+            return _orig_page_from_xml(data_soup)
+        except Exception:
+            return m.Page_postlog()
+
+    m.Page_postlog.from_xml = staticmethod(_safe_page_from_xml)
+
+    def _safe_logs_from_xml(data_soup):
+        # 无记录时页面没有 <tbody>，原实现会 None.find_all 崩溃；这里返回空。
+        tbody = data_soup.find("tbody")
+        rows = tbody.find_all("tr") if tbody is not None else []
+        objs = [m.BawuPostLog.from_xml(t) for t in rows]
+        return m.BawuPostLogs(objs, m.Page_postlog.from_xml(data_soup))
+
+    m.BawuPostLogs.from_xml = staticmethod(_safe_logs_from_xml)
 
 
 _patch_aiotieba()
@@ -664,8 +684,9 @@ $("#dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjec
 async function init(){
   let def={bduss:"",stoken:""};       // 服务端默认（secret.py / 环境变量）
   try{ def=await fetch("/api/defaults").then(r=>r.json()); }catch(e){}
-  cred.bduss=cred.bduss||def.bduss||"";      // localStorage 优先，缺的用默认补
-  cred.stoken=cred.stoken||def.stoken||"";
+  cred.bduss=def.bduss||cred.bduss||"";      // secret.py 优先，覆盖浏览器里残留的旧凭证
+  cred.stoken=def.stoken||cred.stoken||"";
+  localStorage.bduss=cred.bduss; localStorage.stoken=cred.stoken;   // 同步，清掉旧值
   $("#bduss").value=cred.bduss;
   $("#stoken").value=cred.stoken;
   if(cred.bduss) login();
