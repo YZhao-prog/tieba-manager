@@ -12,7 +12,7 @@
 功能：
     主题帖爬取     全楼层 + 楼中楼，大帖秒级返回
     用户发言查询   回复 / 主题帖 / 全部，附「查楼层」精确定位
-    被删帖记录     吧务后台删帖日志（需 STOKEN，吧名带“吧”字）
+    吧务处理记录   某用户被吧务处理（删贴等）的记录（需 STOKEN，吧名带“吧”字）
 结果均支持文本搜索、翻页、复制、下载 txt。封禁功能暂不提供。
 """
 
@@ -140,48 +140,49 @@ async def svc_me(bduss="", stoken="", **_):
         return {"user_id": me.user_id, "show_name": _name(me), "user_name": me.user_name}
 
 
-async def svc_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
+# --- 流式接口（NDJSON）：逐页 yield，前端边收边渲染 ---
+# 每个 chunk 形如 {"type": "head"|"items"|"done", ...}
+
+async def stream_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
     if tid is None:
         raise ServiceError("请填写主题帖 tid。")
     tid = _to_int(tid, "tid")
     max_pages = _cap_pages(max_pages)
     async with _client(bduss, stoken) as client:
-        meta = None
-        floors = []
         pn = 1
         while pn <= max_pages:
-            # with_comments=True 让每页楼层连同前若干条楼中楼一次返回，
-            # 避免对每个楼层再逐页请求（大帖会因此卡住）。
             posts = _check(
                 await client.get_posts(tid, pn, rn=30, with_comments=True, comment_rn=10),
                 "获取楼层",
             )
             if pn == 1:
                 t = posts.thread
-                meta = {"fname": t.fname, "title": t.title, "author": _name(t.user), "reply_num": t.reply_num}
-            for post in posts.objs:
-                comments = [
+                if not posts.objs and not t.tid:
+                    raise ServiceError("未获取到该主题帖，请确认 tid 是否正确。")
+                yield {"type": "head", "head": {
+                    "fname": t.fname, "title": t.title,
+                    "author": _name(t.user), "reply_num": t.reply_num}}
+            floors = [{
+                "floor": post.floor,
+                "user": _name(post.user),
+                "text": post.text,
+                "time": _fmt_time(post.create_time),
+                "comments": [
                     {"user": _name(c.user), "text": c.text, "time": _fmt_time(c.create_time)}
                     for c in post.comments
-                ]
-                floors.append({
-                    "floor": post.floor,
-                    "user": _name(post.user),
-                    "text": post.text,
-                    "time": _fmt_time(post.create_time),
-                    "comments": comments,
-                    "more_comments": max(post.reply_num - len(comments), 0),
-                })
+                ],
+                "more_comments": max(post.reply_num - len(post.comments), 0),
+            } for post in posts.objs]
+            if floors:
+                yield {"type": "items", "items": floors}
             if not posts.has_more:
                 break
             pn += 1
-        if meta is None:
-            raise ServiceError("未获取到该主题帖，请确认 tid 是否正确。")
-        return {"thread": meta, "floors": floors}
+        yield {"type": "done"}
 
 
-async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, kind="posts", **_):
-    """查询用户内容。kind: posts=回复(默认) / threads=主题帖 / all=两者。"""
+async def stream_user(bduss="", stoken="", tieba_uid=None, max_pages=30, kind="posts", **_):
+    """kind: posts=回复 / threads=主题帖 / all=两者。"""
     if tieba_uid is None:
         raise ServiceError("请填写用户贴吧主页 id。")
     if kind not in ("posts", "threads", "all"):
@@ -192,32 +193,30 @@ async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, kind="post
         uid = user.user_id or user.portrait
         if not uid:
             raise ServiceError("未找到该用户，请确认主页 id。")
-        items = []
+        yield {"type": "head", "head": {
+            "tieba_uid": _to_int(tieba_uid, "主页 id"), "show_name": _name(user)}}
         if kind in ("posts", "all"):
-            items += await _collect_posts(client, uid, max_pages)
+            async for chunk in _stream_posts(client, uid, max_pages):
+                yield chunk
         if kind in ("threads", "all"):
-            items += await _collect_threads(client, uid, max_pages)
-        if kind == "all":
-            items.sort(key=lambda x: x["ts"], reverse=True)
-        return {
-            "user": {"tieba_uid": int(tieba_uid), "show_name": _name(user)},
-            "replies": items,
-        }
+            async for chunk in _stream_threads(client, uid, max_pages):
+                yield chunk
+        yield {"type": "done"}
 
 
-async def _collect_posts(client, uid, max_pages):
-    """用户的回复（主楼回复 + 楼中楼）。"""
-    out, fcache, pn = [], {}, 1
+async def _stream_posts(client, uid, max_pages):
+    fcache, pn = {}, 1
     while pn <= max_pages:
         up = _check(await client.get_user_posts(uid, pn), "获取用户回复")
         if not up.objs:
             break
+        items = []
         for group in up.objs:
             fid = group.fid
             if fid not in fcache:
                 fcache[fid] = str(_check(await client.get_fname(fid), "解析贴吧名"))
             for r in group.objs:
-                out.append({
+                items.append({
                     "kind": "reply",
                     "fname": fcache[fid],
                     "tid": r.tid,
@@ -228,70 +227,72 @@ async def _collect_posts(client, uid, max_pages):
                     "text": r.text,
                     "is_comment": bool(getattr(r, "is_comment", False)),
                 })
+        if items:
+            yield {"type": "items", "items": items}
         pn += 1
-    return out
 
 
-async def _collect_threads(client, uid, max_pages):
-    """用户自己发的主题帖。"""
-    out, pn = [], 1
+async def _stream_threads(client, uid, max_pages):
+    pn = 1
     while pn <= max_pages:
         ut = _check(await client.get_user_threads(uid, pn), "获取用户主题帖")
         if not ut.objs:
             break
-        for t in ut.objs:
-            out.append({
-                "kind": "thread",
-                "fname": t.fname,
-                "tid": t.tid,
-                "pid": t.pid,
-                "link": f"https://tieba.baidu.com/p/{t.tid}",
-                "time": _fmt_time(t.create_time),
-                "ts": t.create_time,
-                "title": t.title,
-                "text": t.text,
-                "reply_num": t.reply_num,
-                "view_num": t.view_num,
-                "is_comment": False,
-            })
+        items = [{
+            "kind": "thread",
+            "fname": t.fname,
+            "tid": t.tid,
+            "pid": t.pid,
+            "link": f"https://tieba.baidu.com/p/{t.tid}",
+            "time": _fmt_time(t.create_time),
+            "ts": t.create_time,
+            "title": t.title,
+            "text": t.text,
+            "reply_num": t.reply_num,
+            "view_num": t.view_num,
+            "is_comment": False,
+        } for t in ut.objs]
+        if items:
+            yield {"type": "items", "items": items}
         if not getattr(ut, "has_more", False):
             break
         pn += 1
-    return out
 
 
-async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30, **_):
+async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30, **_):
     if not fname or tieba_uid is None:
         raise ServiceError("请填写贴吧名与被查询人主页 id。")
     if not stoken:
-        raise ServiceError("查询被删帖记录需要 STOKEN，请在页面顶部填写。")
+        raise ServiceError("查询吧务处理记录需要 STOKEN，请在页面顶部填写。")
     max_pages = _cap_pages(max_pages)
     async with _client(bduss, stoken) as client:
         user = await _resolve_user(client, tieba_uid)
         if not user.user_name:
-            # 吧务后台按用户名搜索；没有用户名时 search_value 为空，
+            # 吧务后台按用户名检索；没有用户名时 search_value 为空，
             # 会返回全吧日志并被误标成此人，必须拦下。
             raise ServiceError("该用户没有用户名（仅有昵称），吧务日志按用户名检索，无法查询此用户。")
-        logs, pn = [], 1
+        yield {"type": "head", "head": {"target": _name(user), "fname": fname}}
+        pn = 1
         while pn <= max_pages:
             res = await client.get_bawu_postlogs(
                 fname, pn, search_value=user.user_name, search_type=BawuSearchType.USER)
             if getattr(res, "err", None) is not None:
                 if "302" in str(res.err):
                     raise ServiceError(
-                        "吧务日志鉴权失败（302）。请检查：①STOKEN 要用 .tieba.baidu.com 域下的那个；"
+                        "吧务处理记录鉴权失败（302）。请检查：①STOKEN 要用 .tieba.baidu.com 域下的那个；"
                         "②贴吧名需带“吧”字（如「yy小说吧」）；③当前账号须是该吧吧务。"
                     )
-                raise ServiceError(f"获取吧务日志失败：{res.err}")
-            for x in res.objs:
-                logs.append({
-                    "title": x.title, "text": x.text, "op_user": x.op_user_name,
-                    "op_type": x.op_type, "op_time": str(x.op_time),
-                })
+                raise ServiceError(f"获取吧务处理记录失败：{res.err}")
+            items = [{
+                "title": x.title, "text": x.text, "op_user": x.op_user_name,
+                "op_type": x.op_type, "op_time": str(x.op_time),
+            } for x in res.objs]
+            if items:
+                yield {"type": "items", "items": items}
             if not res.has_more:
                 break
             pn += 1
-        return {"target": _name(user), "fname": fname, "logs": logs}
+        yield {"type": "done"}
 
 
 async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, max_pages=50, **_):
@@ -367,12 +368,17 @@ def load_defaults() -> dict:
 DEFAULTS = load_defaults()
 
 
+# 普通接口：返回完整 JSON {"data": ...}
 ROUTES = {
     "/api/me": svc_me,
-    "/api/thread": svc_thread,
-    "/api/user-posts": svc_user,
-    "/api/postlogs": svc_logs,
     "/api/locate": svc_locate,
+}
+
+# 流式接口：NDJSON，逐页 yield chunk
+STREAM_ROUTES = {
+    "/api/thread": stream_thread,
+    "/api/user-posts": stream_user,
+    "/api/postlogs": stream_logs,
 }
 
 
@@ -410,14 +416,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._host_ok():
             return self._send(403, json.dumps({"error": "forbidden"}))
+        stream_fn = STREAM_ROUTES.get(self.path)
         fn = ROUTES.get(self.path)
-        if fn is None:
+        if stream_fn is None and fn is None:
             return self._send(404, json.dumps({"error": "接口不存在"}))
         try:
             length = int(self.headers.get("Content-Length", 0))
             params = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             return self._send(400, json.dumps({"error": "请求体解析失败"}))
+        if stream_fn is not None:
+            return self._stream(stream_fn, params)
         try:
             data = asyncio.run(fn(**params))
             self._send(200, json.dumps({"data": data}, ensure_ascii=False))
@@ -427,6 +436,32 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": "参数不完整"}, ensure_ascii=False))
         except Exception as e:
             self._send(502, json.dumps({"error": f"贴吧接口异常：{e}"}, ensure_ascii=False))
+
+    def _stream(self, gen_fn, params):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        def write(obj):
+            self.wfile.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+            self.wfile.flush()
+
+        async def pump():
+            try:
+                async for chunk in gen_fn(**params):
+                    write(chunk)
+            except ServiceError as e:
+                write({"type": "error", "error": str(e)})
+            except TypeError:
+                write({"type": "error", "error": "参数不完整"})
+            except Exception as e:
+                write({"type": "error", "error": f"贴吧接口异常：{e}"})
+
+        try:
+            asyncio.run(pump())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def _free_port(start=8000):
@@ -534,6 +569,9 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 18px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px;color:var(--muted)}
 .pager button:disabled{opacity:.4;cursor:not-allowed}
 .pager select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px}
+.jump{width:56px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px}
+.jump:focus{outline:none;border-color:var(--accent)}
+.muted{color:var(--muted)}
 .empty{color:var(--muted);padding:24px 0;text-align:center}
 </style></head><body>
 <header class="top">
@@ -548,7 +586,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
 <nav class="tabs">
   <button class="tab active" data-tab="thread">主题帖爬取</button>
   <button class="tab" data-tab="user">用户发言查询</button>
-  <button class="tab" data-tab="logs">被删帖记录</button>
+  <button class="tab" data-tab="logs">吧务处理记录</button>
 </nav>
 <main>
   <section class="panel active" id="p-thread">
@@ -575,7 +613,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询记录</button>
     </form>
-    <p class="hint">需要 STOKEN（.tieba.baidu.com 域）；吧名要带“吧”字（如 yy小说吧）；当前账号须为该吧吧务。</p>
+    <p class="hint">查该用户在本吧被吧务处理（删贴等）的记录。需 STOKEN（.tieba.baidu.com 域）；吧名带“吧”字；账号须为该吧吧务。</p>
   </section>
   <section class="results" id="results" hidden>
     <div class="rhead">
@@ -587,16 +625,16 @@ main{max-width:960px;margin:0 auto;padding:24px}
       <button class="ghost" id="prev">← 上一页</button>
       <span id="pageinfo"></span>
       <button class="ghost" id="next">下一页 →</button>
+      <span>跳至</span><input id="jump" class="jump" type="number" min="1" title="输入页码回车跳转">
       <select id="per"><option value="50">50/页</option><option value="100">100/页</option><option value="200">200/页</option></select>
     </div>
   </section>
-  <div class="box loading" id="loading" hidden><span class="spin"></span><span>请求中，翻页较多请耐心等待…</span></div>
+  <div class="box loading" id="loading" hidden><span class="spin"></span><span id="loadmsg">加载中…</span></div>
   <div class="box error" id="error" hidden></div>
 </main>
 <script>
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const cred={bduss:localStorage.bduss||"",stoken:localStorage.stoken||""};
-let out={text:"",name:"output.txt"};
 
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 
@@ -614,7 +652,7 @@ async function login(){
   try{
     const me=await api("/api/me",{});
     dot.className=cred.stoken?"dot ok":"dot warn";
-    t.textContent=`已登录：${me.show_name} (uid ${me.user_id})`+(cred.stoken?"":" · 未填 STOKEN，被删帖记录不可用");
+    t.textContent=`已登录：${me.show_name} (uid ${me.user_id})`+(cred.stoken?"":" · 未填 STOKEN，吧务处理记录不可用");
   }catch(e){dot.className="dot err";t.textContent="凭证无效："+e.message;}
 }
 
@@ -630,50 +668,120 @@ async function api(url,body){
 $$(".tab").forEach(tab=>tab.onclick=()=>{
   $$(".tab").forEach(t=>t.classList.remove("active"));
   $$(".panel").forEach(p=>p.classList.remove("active"));
-  tab.classList.add("active");$("#p-"+tab.dataset.tab).classList.add("active");hideRes();
+  tab.classList.add("active");$("#p-"+tab.dataset.tab).classList.add("active");
+  streamToken++;view=null;hideRes();   // 使进行中的流失效
 });
 
-const CONF={
-  thread:{url:"/api/thread",render:renderThread,name:"thread.txt",toText:threadText},
-  user:{url:"/api/user-posts",render:renderUser,name:"user_posts.txt",toText:userText},
-  logs:{url:"/api/postlogs",render:renderLogs,name:"postlogs.txt",toText:logsText},
-};
-$$(".form").forEach(form=>form.onsubmit=async e=>{
-  e.preventDefault();
-  if(!cred.bduss){showErr("请先在右上角填写 BDUSS 并登录");return;}
-  const c=CONF[form.dataset.form],body={};
-  new FormData(form).forEach((v,k)=>body[k]=form.elements[k].type==="number"?Number(v):v);
-  hideRes();load(true);const btn=$("button",form);btn.disabled=true;
-  try{
-    const data=await api(c.url,body);
-    out={text:c.toText(data),name:c.name};
-    c.render(data);
-  }catch(err){showErr(err.message);}
-  finally{load(false);btn.disabled=false;}
-});
-
-// 渲染 —— 统一的“视图”模型，支持文本搜索 + 结果翻页
+// ---- 渲染配置（流式累积；itemHTML/match/head/empty 与数据分离）----
 function setBody(h){$("#rbody").innerHTML=h}
-let view=null, page=1, per=50, query="";
+let view=null, page=1, per=50, query="", streamToken=0;
+const cache=new Map();  // 结果缓存：同一查询秒开
 
-function showResult(v){view=v;query="";page=1;$("#search").value="";$("#results").hidden=false;applyView()}
+const RENDER={
+  thread:{
+    empty:"无楼层",
+    head:m=>`<b>${esc(m.fname)}</b> · ${esc(m.title)} · 楼主 ${esc(m.author)} · 回复 ${m.reply_num}`,
+    match:f=>f.user+" "+f.text+" "+f.comments.map(c=>c.user+" "+c.text).join(" "),
+    itemHTML:f=>{
+      let c=f.comments.map(x=>`<div class="cmt"><span class="cu">${esc(x.user)}</span>${esc(x.text)}</div>`).join("");
+      if(f.more_comments>0)c+=`<div class="cmt muted">… 还有 ${f.more_comments} 条楼中楼未展开</div>`;
+      return `<div class="floor"><div class="fhead"><span class="fno">#${f.floor}</span><span class="fuser">${esc(f.user)}</span><span class="ftime">${esc(f.time)}</span></div><div class="ftext">${esc(f.text)}</div>${c?`<div class="cmts">${c}</div>`:""}</div>`;
+    },
+  },
+  user:{
+    empty:"无内容：查“回复”为空可改选“主题帖”或“全部”；也可能对方未公开发言，或主页 id 有误。",
+    head:m=>`<b>${esc(m.show_name)}</b> · 主页id ${m.tieba_uid}`,
+    match:r=>r.fname+" "+(r.text||"")+" "+(r.title||""),
+    itemHTML:r=> r.kind==="thread"
+      ? `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="spacer"></span><span>${esc(r.time)}</span><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">帖子 ↗</a></div><div class="rtext"><b>${esc(r.title)}</b></div><div class="stats">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
+      : `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><button class="mini locbtn" data-tid="${r.tid}" data-pid="${r.pid}" data-c="${r.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
+  },
+  logs:{
+    empty:"无吧务处理记录",
+    head:m=>`被处理人 <b>${esc(m.target)}</b> · 吧 ${esc(m.fname)}`,
+    match:x=>x.title+" "+x.text+" "+x.op_user,
+    itemHTML:x=>`<div class="row"><div class="meta"><span class="optag">${esc(x.op_type)}</span><span>操作人 ${esc(x.op_user)}</span><span class="spacer"></span><span>${esc(x.op_time)}</span></div><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div></div>`,
+  },
+};
+const FLOW={
+  thread:{url:"/api/thread", rc:"thread", name:"thread.txt", sort:false},
+  user:  {url:"/api/user-posts", rc:"user", name:"user_posts.txt", sort:true},
+  logs:  {url:"/api/postlogs", rc:"logs", name:"records.txt", sort:false},
+};
+
 function applyView(){
   if(!view)return;
+  const rc=RENDER[view.rc];
   const q=query.trim().toLowerCase();
-  const items=q?view.items.filter(it=>view.match(it).toLowerCase().includes(q)):view.items;
+  const items=q?view.items.filter(it=>rc.match(it).toLowerCase().includes(q)):view.items;
   const total=view.items.length, shown=items.length, pages=Math.max(1,Math.ceil(shown/per));
   if(page>pages)page=pages; if(page<1)page=1;
   const slice=items.slice((page-1)*per,page*per);
-  $("#summary").innerHTML=view.head+` · 共 <b>${total}</b> 条`+(q?` · 匹配 <b>${shown}</b>`:"");
-  setBody(slice.length?slice.map(view.itemHTML).join(""):`<div class="empty">${q?"没有匹配的内容":view.empty}</div>`);
+  const head=view.meta?rc.head(view.meta):"结果";
+  $("#summary").innerHTML=head+` · 共 <b>${total}</b> 条`+(q?` · 匹配 <b>${shown}</b>`:"")+(view.done?"":` · <span class="muted">加载中…</span>`);
+  setBody(slice.length?slice.map(rc.itemHTML).join(""):`<div class="empty">${q?"没有匹配的内容":(view.done?rc.empty:"加载中…")}</div>`);
   const pager=$("#pager");
   if(shown>per){pager.hidden=false;$("#pageinfo").textContent=`第 ${page} / ${pages} 页`;$("#prev").disabled=page<=1;$("#next").disabled=page>=pages;}
   else pager.hidden=true;
 }
+
+// 逐行读取 NDJSON 流
+async function streamNDJSON(url,body,onChunk){
+  const res=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({bduss:cred.bduss,stoken:cred.stoken,...body})});
+  if(!res.ok){let m;try{m=(await res.json()).error;}catch(_){}throw new Error(m||("HTTP "+res.status));}
+  const reader=res.body.getReader(), dec=new TextDecoder(); let buf="";
+  for(;;){
+    const {value,done}=await reader.read(); if(done)break;
+    buf+=dec.decode(value,{stream:true});
+    let nl;
+    while((nl=buf.indexOf("\n"))>=0){const line=buf.slice(0,nl).trim();buf=buf.slice(nl+1);if(line)onChunk(JSON.parse(line));}
+  }
+  buf=buf.trim(); if(buf)onChunk(JSON.parse(buf));
+}
+
+// 提交查询：命中缓存则秒开，否则流式边收边渲染
+async function submit(formKind, body){
+  const f=FLOW[formKind], key=formKind+"|"+JSON.stringify(body);
+  $("#error").hidden=true;
+  const token=++streamToken;
+  if(cache.has(key)){
+    const snap=cache.get(key);
+    view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
+    query="";page=1;$("#search").value=""; $("#results").hidden=false; load(false); applyView();
+    return;
+  }
+  view={rc:f.rc, formKind, meta:null, items:[], done:false};
+  query="";page=1;$("#search").value=""; $("#results").hidden=false; applyView();
+  setLoad(0);
+  let errMsg=null;
+  try{
+    await streamNDJSON(f.url, body, chunk=>{
+      if(token!==streamToken)return;
+      if(chunk.type==="head") view.meta=chunk.head;
+      else if(chunk.type==="items"){ view.items.push(...chunk.items); if(f.sort)view.items.sort((a,b)=>b.ts-a.ts); applyView(); setLoad(view.items.length); }
+      else if(chunk.type==="error") errMsg=chunk.error;
+    });
+  }catch(e){ if(token===streamToken) errMsg=e.message; }
+  if(token!==streamToken)return;   // 已被新查询取代
+  load(false); view.done=true; applyView();
+  if(errMsg){ showErr(errMsg); if(!view.items.length)$("#results").hidden=true; }
+  else cache.set(key,{meta:view.meta, items:view.items.slice()});
+}
+
+$$(".form").forEach(form=>form.onsubmit=async e=>{
+  e.preventDefault();
+  if(!cred.bduss){showErr("请先在右上角填写 BDUSS 并登录");return;}
+  const body={};
+  new FormData(form).forEach((v,k)=>body[k]=form.elements[k].type==="number"?Number(v):v);
+  const btn=$("button[type=submit]",form); btn.disabled=true;
+  try{ await submit(form.dataset.form, body); } finally{ btn.disabled=false; }
+});
+
 // 「查楼层」按需定位（事件委托，#rbody 常驻）
 $("#rbody").addEventListener("click",async e=>{
   const b=e.target.closest(".locbtn"); if(!b||b.dataset.done)return;
-  b.disabled=true; const old=b.textContent; b.textContent="查询中…";
+  b.disabled=true; b.textContent="查询中…";
   try{
     const res=await api("/api/locate",{tid:Number(b.dataset.tid),pid:Number(b.dataset.pid),is_comment:b.dataset.c==="1"});
     if(res.found){
@@ -686,38 +794,7 @@ $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
 $("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
 $("#per").onchange=e=>{per=Number(e.target.value);page=1;applyView()};
-
-function renderThread(d){
-  const t=d.thread;
-  showResult({
-    head:`<b>${esc(t.fname)}</b> · ${esc(t.title)} · 楼主 ${esc(t.author)} · 回复 ${t.reply_num}`,
-    items:d.floors, empty:"无楼层",
-    match:f=>f.user+" "+f.text+" "+f.comments.map(c=>c.user+" "+c.text).join(" "),
-    itemHTML:f=>{
-      let c=f.comments.map(x=>`<div class="cmt"><span class="cu">${esc(x.user)}</span>${esc(x.text)}</div>`).join("");
-      if(f.more_comments>0)c+=`<div class="cmt" style="color:var(--muted)">… 还有 ${f.more_comments} 条楼中楼未展开</div>`;
-      return `<div class="floor"><div class="fhead"><span class="fno">#${f.floor}</span><span class="fuser">${esc(f.user)}</span><span class="ftime">${esc(f.time)}</span></div><div class="ftext">${esc(f.text)}</div>${c?`<div class="cmts">${c}</div>`:""}</div>`;
-    },
-  });
-}
-function renderUser(d){
-  showResult({
-    head:`<b>${esc(d.user.show_name)}</b> · 主页id ${d.user.tieba_uid}`,
-    items:d.replies, empty:"无内容：查“回复”为空可改选“主题帖”或“全部”；也可能对方未公开发言，或主页 id 有误。",
-    match:r=>r.fname+" "+(r.text||"")+" "+(r.title||""),
-    itemHTML:r=> r.kind==="thread"
-      ? `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="spacer"></span><span>${esc(r.time)}</span><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">帖子 ↗</a></div><div class="rtext"><b>${esc(r.title)}</b></div><div class="stats">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
-      : `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><button class="mini locbtn" data-tid="${r.tid}" data-pid="${r.pid}" data-c="${r.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
-  });
-}
-function renderLogs(d){
-  showResult({
-    head:`被处理人 <b>${esc(d.target)}</b> · 吧 ${esc(d.fname)}`,
-    items:d.logs, empty:"无被删帖记录",
-    match:x=>x.title+" "+x.text+" "+x.op_user,
-    itemHTML:x=>`<div class="row"><div class="meta"><span class="optag">${esc(x.op_type)}</span><span>操作人 ${esc(x.op_user)}</span><span class="spacer"></span><span>${esc(x.op_time)}</span></div><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div></div>`,
-  });
-}
+$("#jump").onchange=e=>{const n=Number(e.target.value); if(n>=1){page=n;applyView();$("#rbody").scrollTop=0;} e.target.value="";};
 
 // 导出文本
 function threadText(d){
@@ -740,27 +817,43 @@ function userText(d){
   L.push("",`共 ${d.replies.length} 条`);return L.join("\n")+"\n";
 }
 function logsText(d){
-  if(!d.logs.length)return`未查询到 ${d.target} 在 ${d.fname} 的被删帖记录。\n`;
+  if(!d.logs.length)return`未查询到 ${d.target} 在 ${d.fname} 的吧务处理记录。\n`;
   let L=[];d.logs.forEach(x=>L.push(`被处理人：${d.target}`,x.title,x.text,`${x.op_user} ${x.op_type} ${x.op_time}`,"==============="));
   return L.join("\n")+"\n";
 }
 
+// 由当前累积结果重建导出文本
+function currentText(){
+  if(!view||!view.meta)return "";
+  const k=view.formKind, items=view.items, m=view.meta;
+  const d = k==="thread"?{thread:m,floors:items}
+          : k==="user"?{user:m,replies:items}
+          : {target:m.target,fname:m.fname,logs:items};
+  return ({thread:threadText,user:userText,logs:logsText})[k](d);
+}
+
 // 结果区
-function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true}
+function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true;$("#loading").hidden=true}
 function load(on){$("#loading").hidden=!on}
+function setLoad(n){$("#loading").hidden=false;$("#loadmsg").textContent=n?`加载中… 已 ${n} 条`:"加载中…";}
 function showErr(m){const e=$("#error");e.textContent="出错了："+m;e.hidden=false}
 $("#copy").onclick=async()=>{
-  const b=$("#copy"),o=b.textContent;
-  try{ await navigator.clipboard.writeText(out.text); b.textContent="已复制"; }
+  const txt=currentText(), b=$("#copy"),o=b.textContent;
+  try{ await navigator.clipboard.writeText(txt); b.textContent="已复制"; }
   catch(e){  // 剪贴板权限被拒时的降级方案
-    const ta=document.createElement("textarea"); ta.value=out.text;
+    const ta=document.createElement("textarea"); ta.value=txt;
     document.body.appendChild(ta); ta.select();
     b.textContent=document.execCommand("copy")?"已复制":"复制失败";
     ta.remove();
   }
   setTimeout(()=>b.textContent=o,1200);
 };
-$("#dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([out.text],{type:"text/plain;charset=utf-8"}));a.download=out.name;a.click();URL.revokeObjectURL(a.href)};
+$("#dl").onclick=()=>{
+  if(!view)return;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([currentText()],{type:"text/plain;charset=utf-8"}));
+  a.download=FLOW[view.formKind].name; a.click(); URL.revokeObjectURL(a.href);
+};
 
 async function init(){
   let def={bduss:"",stoken:""};       // 服务端默认（secret.py / 环境变量）
