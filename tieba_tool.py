@@ -127,7 +127,10 @@ async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, **_):
                         "is_comment": bool(getattr(r, "is_comment", False)),
                     })
             pn += 1
-        return {"user": {"user_id": user.user_id, "show_name": _name(user)}, "replies": replies}
+        return {
+            "user": {"tieba_uid": int(tieba_uid), "show_name": _name(user)},
+            "replies": replies,
+        }
 
 
 async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30, **_):
@@ -311,11 +314,14 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .cmts{margin:10px 0 0 16px;padding-left:14px;border-left:2px solid var(--border)}
 .cmt{padding:6px 0;font-size:13.5px}.cmt .cu{color:var(--muted);margin-right:8px}
 .row{padding:12px 0;border-bottom:1px solid var(--border)}.row:last-child{border-bottom:none}
-.meta{font-size:12.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
-.meta a{color:var(--accent);text-decoration:none}.meta a:hover{text-decoration:underline}
-.tag{background:#1d3a63;color:#cfe0ff;border-radius:4px;padding:0 6px;font-size:11px}
-.rtext{white-space:pre-wrap;word-break:break-word;margin-top:4px}
-.ltitle{font-weight:500}.ltext{white-space:pre-wrap;margin:4px 0}.lop{font-size:12.5px;color:var(--warn)}
+.meta{font-size:12.5px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.meta .spacer{flex:1 1 auto}
+.meta a{color:var(--accent);text-decoration:none;white-space:nowrap}.meta a:hover{text-decoration:underline}
+.chip{background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:1px 8px;font-size:12px;color:var(--text)}
+.tag{background:#1d3a63;color:#cfe0ff;border-radius:4px;padding:1px 6px;font-size:11px}
+.rtext{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin-top:6px;font-size:14px}
+.ltitle{font-weight:500;margin-top:6px}.ltext{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);margin-top:4px;font-size:13.5px}
+.optag{background:#3a2a12;color:#ffd7a8;border:1px solid #5a3f1c;border-radius:4px;padding:1px 6px;font-size:11px}
 .box{margin-top:24px;padding:16px 18px;border-radius:var(--r);display:flex;align-items:center;gap:12px;font-size:14px}
 .loading{background:var(--surface);border:1px solid var(--border);color:var(--muted)}
 .error{background:#2a1416;border:1px solid #52262a;color:#ffb4b4;white-space:pre-wrap}
@@ -481,10 +487,10 @@ function renderThread(d){
 }
 function renderUser(d){
   showResult({
-    head:`<b>${esc(d.user.show_name)}</b> (uid ${d.user.user_id})`,
-    items:d.replies, empty:"无回复（可能对方未公开回复，或 id 有误）",
+    head:`<b>${esc(d.user.show_name)}</b> · 主页id ${d.user.tieba_uid}`,
+    items:d.replies, empty:"无回复（可能对方未公开回复，或主页 id 有误）",
     match:r=>r.fname+" "+r.text,
-    itemHTML:r=>`<div class="row"><div class="meta"><span>贴吧 <b>${esc(r.fname)}</b></span><span>${esc(r.time)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<a href="${esc(r.link)}" target="_blank" rel="noopener">原帖</a></div><div class="rtext">${esc(r.text)}</div></div>`,
+    itemHTML:r=>`<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><a href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
   });
 }
 function renderLogs(d){
@@ -492,7 +498,7 @@ function renderLogs(d){
     head:`被处理人 <b>${esc(d.target)}</b> · 吧 ${esc(d.fname)}`,
     items:d.logs, empty:"无被删帖记录",
     match:x=>x.title+" "+x.text+" "+x.op_user,
-    itemHTML:x=>`<div class="row"><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div><div class="lop">${esc(x.op_user)} · ${esc(x.op_type)} · ${esc(x.op_time)}</div></div>`,
+    itemHTML:x=>`<div class="row"><div class="meta"><span class="optag">${esc(x.op_type)}</span><span>操作人 ${esc(x.op_user)}</span><span class="spacer"></span><span>${esc(x.op_time)}</span></div><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div></div>`,
   });
 }
 
@@ -506,7 +512,7 @@ function threadText(d){
   return L.join("\n")+"\n";
 }
 function userText(d){
-  let L=[`查询用户: ${d.user.show_name} (uid=${d.user.user_id})`,""];
+  let L=[`查询用户: ${d.user.show_name} (主页id=${d.user.tieba_uid})`,""];
   d.replies.forEach(r=>{L.push(`贴吧名: ${r.fname} 链接: ${r.link} 回复时间: ${r.time}${r.is_comment?"（楼中楼）":""}`,`   ${r.text}`);});
   L.push("",`共 ${d.replies.length} 条回复`);return L.join("\n")+"\n";
 }
