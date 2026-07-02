@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""贴吧吧务小工具 —— 单文件版。
+"""贴吧吧务小工具 —— 单文件版（后端 + 网页全在这一个文件里）。
 
 用法：
     python3 tieba_tool.py
-然后浏览器会自动打开 http://127.0.0.1:8000
-在页面顶部填一次 BDUSS（被删帖记录还需 STOKEN），即可使用。
+浏览器会自动打开 http://127.0.0.1:8000。
 
-功能：主题帖爬取 / 用户发言查询（回复+主题帖）/ 被删帖记录。
-封禁功能暂不提供。
+凭证：把 BDUSS/STOKEN 写进 secret.py（gitignore，见 secret.example.py）
+可自动登录；也可以在页面右上角手动填。STOKEN 必须用 .tieba.baidu.com
+域下的那个（.passport 域的会 302）。
+
+功能：
+    主题帖爬取     全楼层 + 楼中楼，大帖秒级返回
+    用户发言查询   回复 / 主题帖 / 全部，附「查楼层」精确定位
+    被删帖记录     吧务后台删帖日志（需 STOKEN，吧名带“吧”字）
+结果均支持文本搜索、翻页、复制、下载 txt。封禁功能暂不提供。
 """
 
 from __future__ import annotations
@@ -106,6 +112,28 @@ def _check(resp, action: str):
     return resp
 
 
+PAGE_CAP = 200  # 单次请求的翻页硬上限
+
+
+def _to_int(value, name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ServiceError(f"{name} 应为数字。")
+
+
+def _cap_pages(n) -> int:
+    return max(1, min(_to_int(n, "翻页数"), PAGE_CAP))
+
+
+async def _resolve_user(client, tieba_uid):
+    """主页 id -> 用户信息，失败时给可读提示（上游报错是 int 解析噪音）。"""
+    resp = await client.tieba_uid2user_info(_to_int(tieba_uid, "主页 id"))
+    if getattr(resp, "err", None) is not None:
+        raise ServiceError("未找到该主页 id 对应的用户，请确认填的是个人主页链接中的数字。")
+    return resp
+
+
 async def svc_me(bduss="", stoken="", **_):
     async with _client(bduss, stoken) as client:
         me = _check(await client.get_self_info(), "获取账号信息")
@@ -115,6 +143,8 @@ async def svc_me(bduss="", stoken="", **_):
 async def svc_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
     if tid is None:
         raise ServiceError("请填写主题帖 tid。")
+    tid = _to_int(tid, "tid")
+    max_pages = _cap_pages(max_pages)
     async with _client(bduss, stoken) as client:
         meta = None
         floors = []
@@ -123,7 +153,7 @@ async def svc_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
             # with_comments=True 让每页楼层连同前若干条楼中楼一次返回，
             # 避免对每个楼层再逐页请求（大帖会因此卡住）。
             posts = _check(
-                await client.get_posts(int(tid), pn, rn=30, with_comments=True, comment_rn=10),
+                await client.get_posts(tid, pn, rn=30, with_comments=True, comment_rn=10),
                 "获取楼层",
             )
             if pn == 1:
@@ -154,9 +184,14 @@ async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, kind="post
     """查询用户内容。kind: posts=回复(默认) / threads=主题帖 / all=两者。"""
     if tieba_uid is None:
         raise ServiceError("请填写用户贴吧主页 id。")
+    if kind not in ("posts", "threads", "all"):
+        raise ServiceError("内容类型无效。")
+    max_pages = _cap_pages(max_pages)
     async with _client(bduss, stoken) as client:
-        user = _check(await client.tieba_uid2user_info(int(tieba_uid)), "解析用户")
+        user = await _resolve_user(client, tieba_uid)
         uid = user.user_id or user.portrait
+        if not uid:
+            raise ServiceError("未找到该用户，请确认主页 id。")
         items = []
         if kind in ("posts", "all"):
             items += await _collect_posts(client, uid, max_pages)
@@ -230,8 +265,13 @@ async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30
         raise ServiceError("请填写贴吧名与被查询人主页 id。")
     if not stoken:
         raise ServiceError("查询被删帖记录需要 STOKEN，请在页面顶部填写。")
+    max_pages = _cap_pages(max_pages)
     async with _client(bduss, stoken) as client:
-        user = _check(await client.tieba_uid2user_info(int(tieba_uid)), "解析用户")
+        user = await _resolve_user(client, tieba_uid)
+        if not user.user_name:
+            # 吧务后台按用户名搜索；没有用户名时 search_value 为空，
+            # 会返回全吧日志并被误标成此人，必须拦下。
+            raise ServiceError("该用户没有用户名（仅有昵称），吧务日志按用户名检索，无法查询此用户。")
         logs, pn = [], 1
         while pn <= max_pages:
             res = await client.get_bawu_postlogs(
@@ -261,8 +301,8 @@ async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, 
     """
     if tid is None or pid is None:
         raise ServiceError("缺少 tid/pid。")
-    tid, pid = int(tid), int(pid)
-    max_pages = min(int(max_pages), 50)  # 楼层页扫描上限，避免深帖跑太久
+    tid, pid = _to_int(tid, "tid"), _to_int(pid, "pid")
+    max_pages = min(_to_int(max_pages, "翻页数"), 50)  # 楼层页扫描上限，避免深帖跑太久
     async with _client(bduss, stoken) as client:
         deep_floors = []  # 楼中楼数超过内联的楼层，第一遍没命中时再深挖
         pn = 1
@@ -344,6 +384,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):  # 静默
         pass
 
+    def _host_ok(self) -> bool:
+        # 只接受本机 Host，防止恶意网页借 DNS rebinding 读取 /api/defaults 里的凭证
+        host = self.headers.get("Host", "")
+        return host.startswith("127.0.0.1") or host.startswith("localhost")
+
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         data = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
@@ -353,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, "forbidden", "text/plain; charset=utf-8")
         if self.path in ("/", "/index.html"):
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif self.path == "/api/defaults":
@@ -361,6 +408,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain; charset=utf-8")
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._send(403, json.dumps({"error": "forbidden"}))
         fn = ROUTES.get(self.path)
         if fn is None:
             return self._send(404, json.dumps({"error": "接口不存在"}))
@@ -512,7 +561,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   </section>
   <section class="panel" id="p-user">
     <form class="form" data-form="user">
-      <label>用户贴吧主页 id<input name="tieba_uid" type="number" required placeholder="tieba_uid"></label>
+      <label>用户贴吧主页 id<input name="tieba_uid" type="number" required placeholder="个人主页链接中的数字"></label>
       <label>内容<select name="kind"><option value="posts">回复</option><option value="threads">主题帖</option><option value="all">全部</option></select></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询</button>
@@ -521,8 +570,8 @@ main{max-width:960px;margin:0 auto;padding:24px}
   </section>
   <section class="panel" id="p-logs">
     <form class="form" data-form="logs">
-      <label>贴吧名<input name="fname" type="text" required placeholder="如 yy小说"></label>
-      <label>被查询人主页 id<input name="tieba_uid" type="number" required placeholder="tieba_uid"></label>
+      <label>贴吧名（带“吧”字）<input name="fname" type="text" required placeholder="如 yy小说吧"></label>
+      <label>被查询人主页 id<input name="tieba_uid" type="number" required placeholder="个人主页链接中的数字"></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询记录</button>
     </form>
@@ -700,7 +749,17 @@ function logsText(d){
 function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true}
 function load(on){$("#loading").hidden=!on}
 function showErr(m){const e=$("#error");e.textContent="出错了："+m;e.hidden=false}
-$("#copy").onclick=async()=>{await navigator.clipboard.writeText(out.text);const b=$("#copy"),o=b.textContent;b.textContent="已复制";setTimeout(()=>b.textContent=o,1200)};
+$("#copy").onclick=async()=>{
+  const b=$("#copy"),o=b.textContent;
+  try{ await navigator.clipboard.writeText(out.text); b.textContent="已复制"; }
+  catch(e){  // 剪贴板权限被拒时的降级方案
+    const ta=document.createElement("textarea"); ta.value=out.text;
+    document.body.appendChild(ta); ta.select();
+    b.textContent=document.execCommand("copy")?"已复制":"复制失败";
+    ta.remove();
+  }
+  setTimeout(()=>b.textContent=o,1200);
+};
 $("#dl").onclick=()=>{const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([out.text],{type:"text/plain;charset=utf-8"}));a.download=out.name;a.click();URL.revokeObjectURL(a.href)};
 
 async function init(){
