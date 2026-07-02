@@ -73,17 +73,27 @@ async def svc_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
         floors = []
         pn = 1
         while pn <= max_pages:
-            posts = _check(await client.get_posts(int(tid), pn, rn=30), "获取楼层")
+            # with_comments=True 让每页楼层连同前若干条楼中楼一次返回，
+            # 避免对每个楼层再逐页请求（大帖会因此卡住）。
+            posts = _check(
+                await client.get_posts(int(tid), pn, rn=30, with_comments=True, comment_rn=10),
+                "获取楼层",
+            )
             if pn == 1:
                 t = posts.thread
                 meta = {"fname": t.fname, "title": t.title, "author": _name(t.user), "reply_num": t.reply_num}
             for post in posts.objs:
+                comments = [
+                    {"user": _name(c.user), "text": c.text, "time": _fmt_time(c.create_time)}
+                    for c in post.comments
+                ]
                 floors.append({
                     "floor": post.floor,
                     "user": _name(post.user),
                     "text": post.text,
                     "time": _fmt_time(post.create_time),
-                    "comments": await _all_comments(client, int(tid), post),
+                    "comments": comments,
+                    "more_comments": max(post.reply_num - len(comments), 0),
                 })
             if not posts.has_more:
                 break
@@ -91,19 +101,6 @@ async def svc_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
         if meta is None:
             raise ServiceError("未获取到该主题帖，请确认 tid 是否正确。")
         return {"thread": meta, "floors": floors}
-
-
-async def _all_comments(client, tid, post):
-    if not post.reply_num:
-        return []
-    out, cpn = [], 1
-    while cpn <= 200:
-        cs = _check(await client.get_comments(tid, post.pid, cpn), "获取楼中楼")
-        out += [{"user": _name(c.user), "text": c.text, "time": _fmt_time(c.create_time)} for c in cs.objs]
-        if not cs.has_more:
-            break
-        cpn += 1
-    return out
 
 
 async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, **_):
@@ -336,7 +333,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="panel active" id="p-thread">
     <form class="form" data-form="thread">
       <label>主题帖 tid<input name="tid" type="number" required placeholder="帖子链接中的数字"></label>
-      <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
+      <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
       <button type="submit">开始爬取</button>
     </form>
     <p class="hint">抓取该主题帖的所有楼层与楼中楼。</p>
@@ -434,7 +431,8 @@ function renderThread(d){
   $("#summary").innerHTML=`<b>${esc(t.fname)}</b> · ${esc(t.title)} · 楼主 ${esc(t.author)} · 回复 ${t.reply_num} · 已取 <b>${d.floors.length}</b> 楼`;
   if(!d.floors.length)return setBody('<div class="empty">无楼层</div>');
   setBody(d.floors.map(f=>{
-    const c=f.comments.map(x=>`<div class="cmt"><span class="cu">${esc(x.user)}</span>${esc(x.text)}</div>`).join("");
+    let c=f.comments.map(x=>`<div class="cmt"><span class="cu">${esc(x.user)}</span>${esc(x.text)}</div>`).join("");
+    if(f.more_comments>0) c+=`<div class="cmt" style="color:var(--muted)">… 还有 ${f.more_comments} 条楼中楼未展开</div>`;
     return `<div class="floor"><div class="fhead"><span class="fno">#${f.floor}</span><span class="fuser">${esc(f.user)}</span><span class="ftime">${esc(f.time)}</span></div><div class="ftext">${esc(f.text)}</div>${c?`<div class="cmts">${c}</div>`:""}</div>`;
   }).join(""));
 }
@@ -453,7 +451,9 @@ function renderLogs(d){
 function threadText(d){
   const t=d.thread;let L=[`贴吧名: ${t.fname}`,"",`标题: ${t.title}`,"",`发帖人: ${t.author}`,"",`回复数： ${t.reply_num}`,"","======================"];
   d.floors.forEach(f=>{L.push(`楼层： ${f.floor}  用户名: ${f.user}  回复: ${f.text}`,"");
-    f.comments.forEach(c=>L.push(`  楼中楼： 用户名: ${c.user}  回复: ${c.text}`,""));L.push("======================");});
+    f.comments.forEach(c=>L.push(`  楼中楼： 用户名: ${c.user}  回复: ${c.text}`,""));
+    if(f.more_comments>0)L.push(`  … 还有 ${f.more_comments} 条楼中楼未展开`,"");
+    L.push("======================");});
   return L.join("\n")+"\n";
 }
 function userText(d){
