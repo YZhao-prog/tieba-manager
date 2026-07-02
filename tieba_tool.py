@@ -314,6 +314,11 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .error{background:#2a1416;border:1px solid #52262a;color:#ffb4b4;white-space:pre-wrap}
 .spin{width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:s .8s linear infinite}
 @keyframes s{to{transform:rotate(360deg)}}
+.search{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 12px;font-size:13px;width:160px}
+.search:focus{outline:none;border-color:var(--accent)}
+.pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 18px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px;color:var(--muted)}
+.pager button:disabled{opacity:.4;cursor:not-allowed}
+.pager select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px}
 .empty{color:var(--muted);padding:24px 0;text-align:center}
 </style></head><body>
 <header class="top">
@@ -359,9 +364,15 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
+      <div class="ract"><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
     </div>
     <div id="rbody"></div>
+    <div class="pager" id="pager" hidden>
+      <button class="ghost" id="prev">← 上一页</button>
+      <span id="pageinfo"></span>
+      <button class="ghost" id="next">下一页 →</button>
+      <select id="per"><option value="50">50/页</option><option value="100">100/页</option><option value="200">200/页</option></select>
+    </div>
   </section>
   <div class="box loading" id="loading" hidden><span class="spin"></span><span>请求中，翻页较多请耐心等待…</span></div>
   <div class="box error" id="error" hidden></div>
@@ -420,32 +431,62 @@ $$(".form").forEach(form=>form.onsubmit=async e=>{
   try{
     const data=await api(c.url,body);
     out={text:c.toText(data),name:c.name};
-    c.render(data);showRes();
+    c.render(data);
   }catch(err){showErr(err.message);}
   finally{load(false);btn.disabled=false;}
 });
 
-// 渲染
+// 渲染 —— 统一的“视图”模型，支持文本搜索 + 结果翻页
 function setBody(h){$("#rbody").innerHTML=h}
+let view=null, page=1, per=50, query="";
+
+function showResult(v){view=v;query="";page=1;$("#search").value="";$("#results").hidden=false;applyView()}
+function applyView(){
+  if(!view)return;
+  const q=query.trim().toLowerCase();
+  const items=q?view.items.filter(it=>view.match(it).toLowerCase().includes(q)):view.items;
+  const total=view.items.length, shown=items.length, pages=Math.max(1,Math.ceil(shown/per));
+  if(page>pages)page=pages; if(page<1)page=1;
+  const slice=items.slice((page-1)*per,page*per);
+  $("#summary").innerHTML=view.head+` · 共 <b>${total}</b> 条`+(q?` · 匹配 <b>${shown}</b>`:"");
+  setBody(slice.length?slice.map(view.itemHTML).join(""):`<div class="empty">${q?"没有匹配的内容":view.empty}</div>`);
+  const pager=$("#pager");
+  if(shown>per){pager.hidden=false;$("#pageinfo").textContent=`第 ${page} / ${pages} 页`;$("#prev").disabled=page<=1;$("#next").disabled=page>=pages;}
+  else pager.hidden=true;
+}
+$("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
+$("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
+$("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
+$("#per").onchange=e=>{per=Number(e.target.value);page=1;applyView()};
+
 function renderThread(d){
   const t=d.thread;
-  $("#summary").innerHTML=`<b>${esc(t.fname)}</b> · ${esc(t.title)} · 楼主 ${esc(t.author)} · 回复 ${t.reply_num} · 已取 <b>${d.floors.length}</b> 楼`;
-  if(!d.floors.length)return setBody('<div class="empty">无楼层</div>');
-  setBody(d.floors.map(f=>{
-    let c=f.comments.map(x=>`<div class="cmt"><span class="cu">${esc(x.user)}</span>${esc(x.text)}</div>`).join("");
-    if(f.more_comments>0) c+=`<div class="cmt" style="color:var(--muted)">… 还有 ${f.more_comments} 条楼中楼未展开</div>`;
-    return `<div class="floor"><div class="fhead"><span class="fno">#${f.floor}</span><span class="fuser">${esc(f.user)}</span><span class="ftime">${esc(f.time)}</span></div><div class="ftext">${esc(f.text)}</div>${c?`<div class="cmts">${c}</div>`:""}</div>`;
-  }).join(""));
+  showResult({
+    head:`<b>${esc(t.fname)}</b> · ${esc(t.title)} · 楼主 ${esc(t.author)} · 回复 ${t.reply_num}`,
+    items:d.floors, empty:"无楼层",
+    match:f=>f.user+" "+f.text+" "+f.comments.map(c=>c.user+" "+c.text).join(" "),
+    itemHTML:f=>{
+      let c=f.comments.map(x=>`<div class="cmt"><span class="cu">${esc(x.user)}</span>${esc(x.text)}</div>`).join("");
+      if(f.more_comments>0)c+=`<div class="cmt" style="color:var(--muted)">… 还有 ${f.more_comments} 条楼中楼未展开</div>`;
+      return `<div class="floor"><div class="fhead"><span class="fno">#${f.floor}</span><span class="fuser">${esc(f.user)}</span><span class="ftime">${esc(f.time)}</span></div><div class="ftext">${esc(f.text)}</div>${c?`<div class="cmts">${c}</div>`:""}</div>`;
+    },
+  });
 }
 function renderUser(d){
-  $("#summary").innerHTML=`<b>${esc(d.user.show_name)}</b> (uid ${d.user.user_id}) · 共 <b>${d.replies.length}</b> 条回复`;
-  if(!d.replies.length)return setBody('<div class="empty">无回复</div>');
-  setBody(d.replies.map(r=>`<div class="row"><div class="meta"><span>贴吧 <b>${esc(r.fname)}</b></span><span>${esc(r.time)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<a href="${esc(r.link)}" target="_blank" rel="noopener">原帖</a></div><div class="rtext">${esc(r.text)}</div></div>`).join(""));
+  showResult({
+    head:`<b>${esc(d.user.show_name)}</b> (uid ${d.user.user_id})`,
+    items:d.replies, empty:"无回复（可能对方未公开回复，或 id 有误）",
+    match:r=>r.fname+" "+r.text,
+    itemHTML:r=>`<div class="row"><div class="meta"><span>贴吧 <b>${esc(r.fname)}</b></span><span>${esc(r.time)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<a href="${esc(r.link)}" target="_blank" rel="noopener">原帖</a></div><div class="rtext">${esc(r.text)}</div></div>`,
+  });
 }
 function renderLogs(d){
-  $("#summary").innerHTML=`被处理人 <b>${esc(d.target)}</b> · 吧 ${esc(d.fname)} · 共 <b>${d.logs.length}</b> 条记录`;
-  if(!d.logs.length)return setBody('<div class="empty">无被删帖记录</div>');
-  setBody(d.logs.map(x=>`<div class="row"><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div><div class="lop">${esc(x.op_user)} · ${esc(x.op_type)} · ${esc(x.op_time)}</div></div>`).join(""));
+  showResult({
+    head:`被处理人 <b>${esc(d.target)}</b> · 吧 ${esc(d.fname)}`,
+    items:d.logs, empty:"无被删帖记录",
+    match:x=>x.title+" "+x.text+" "+x.op_user,
+    itemHTML:x=>`<div class="row"><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div><div class="lop">${esc(x.op_user)} · ${esc(x.op_type)} · ${esc(x.op_time)}</div></div>`,
+  });
 }
 
 // 导出文本
@@ -469,8 +510,7 @@ function logsText(d){
 }
 
 // 结果区
-function showRes(){$("#results").hidden=false}
-function hideRes(){$("#results").hidden=true;$("#error").hidden=true}
+function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true}
 function load(on){$("#loading").hidden=!on}
 function showErr(m){const e=$("#error");e.textContent="出错了："+m;e.hidden=false}
 $("#copy").onclick=async()=>{await navigator.clipboard.writeText(out.text);const b=$("#copy"),o=b.textContent;b.textContent="已复制";setTimeout(()=>b.textContent=o,1200)};
