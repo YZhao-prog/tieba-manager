@@ -103,36 +103,79 @@ async def svc_thread(bduss="", stoken="", tid=None, max_pages=30, **_):
         return {"thread": meta, "floors": floors}
 
 
-async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, **_):
+async def svc_user(bduss="", stoken="", tieba_uid=None, max_pages=30, kind="posts", **_):
+    """查询用户内容。kind: posts=回复(默认) / threads=主题帖 / all=两者。"""
     if tieba_uid is None:
         raise ServiceError("请填写用户贴吧主页 id。")
     async with _client(bduss, stoken) as client:
         user = _check(await client.tieba_uid2user_info(int(tieba_uid)), "解析用户")
         uid = user.user_id or user.portrait
-        replies, fcache, pn = [], {}, 1
-        while pn <= max_pages:
-            up = _check(await client.get_user_posts(uid, pn), "获取用户回复")
-            if not up.objs:
-                break
-            for group in up.objs:
-                fid = group.fid
-                if fid not in fcache:
-                    fcache[fid] = str(_check(await client.get_fname(fid), "解析贴吧名"))
-                for r in group.objs:
-                    replies.append({
-                        "fname": fcache[fid],
-                        "tid": r.tid,
-                        "pid": r.pid,
-                        "link": f"https://tieba.baidu.com/p/{r.tid}?pid={r.pid}&cid=0#{r.pid}",
-                        "time": _fmt_time(r.create_time),
-                        "text": r.text,
-                        "is_comment": bool(getattr(r, "is_comment", False)),
-                    })
-            pn += 1
+        items = []
+        if kind in ("posts", "all"):
+            items += await _collect_posts(client, uid, max_pages)
+        if kind in ("threads", "all"):
+            items += await _collect_threads(client, uid, max_pages)
+        if kind == "all":
+            items.sort(key=lambda x: x["ts"], reverse=True)
         return {
             "user": {"tieba_uid": int(tieba_uid), "show_name": _name(user)},
-            "replies": replies,
+            "replies": items,
         }
+
+
+async def _collect_posts(client, uid, max_pages):
+    """用户的回复（主楼回复 + 楼中楼）。"""
+    out, fcache, pn = [], {}, 1
+    while pn <= max_pages:
+        up = _check(await client.get_user_posts(uid, pn), "获取用户回复")
+        if not up.objs:
+            break
+        for group in up.objs:
+            fid = group.fid
+            if fid not in fcache:
+                fcache[fid] = str(_check(await client.get_fname(fid), "解析贴吧名"))
+            for r in group.objs:
+                out.append({
+                    "kind": "reply",
+                    "fname": fcache[fid],
+                    "tid": r.tid,
+                    "pid": r.pid,
+                    "link": f"https://tieba.baidu.com/p/{r.tid}?pid={r.pid}&cid=0#{r.pid}",
+                    "time": _fmt_time(r.create_time),
+                    "ts": r.create_time,
+                    "text": r.text,
+                    "is_comment": bool(getattr(r, "is_comment", False)),
+                })
+        pn += 1
+    return out
+
+
+async def _collect_threads(client, uid, max_pages):
+    """用户自己发的主题帖。"""
+    out, pn = [], 1
+    while pn <= max_pages:
+        ut = _check(await client.get_user_threads(uid, pn), "获取用户主题帖")
+        if not ut.objs:
+            break
+        for t in ut.objs:
+            out.append({
+                "kind": "thread",
+                "fname": t.fname,
+                "tid": t.tid,
+                "pid": t.pid,
+                "link": f"https://tieba.baidu.com/p/{t.tid}",
+                "time": _fmt_time(t.create_time),
+                "ts": t.create_time,
+                "title": t.title,
+                "text": t.text,
+                "reply_num": t.reply_num,
+                "view_num": t.view_num,
+                "is_comment": False,
+            })
+        if not getattr(ut, "has_more", False):
+            break
+        pn += 1
+    return out
 
 
 async def svc_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30, **_):
@@ -357,6 +400,9 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .mini:disabled{cursor:default;opacity:.7}
 .mini.hit{border-color:var(--accent);color:#cfe0ff}
 .tag{background:#1d3a63;color:#cfe0ff;border-radius:4px;padding:1px 6px;font-size:11px}
+.tag2{background:#123a1d;color:#b6f0c0;border:1px solid #1c5a2c;border-radius:4px;padding:1px 6px;font-size:11px}
+.stats{font-size:12px;color:var(--muted);margin-top:4px}
+.form select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:14px}
 .rtext{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin-top:6px;font-size:14px}
 .ltitle{font-weight:500;margin-top:6px}.ltext{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);margin-top:4px;font-size:13.5px}
 .optag{background:#3a2a12;color:#ffd7a8;border:1px solid #5a3f1c;border-radius:4px;padding:1px 6px;font-size:11px}
@@ -398,10 +444,11 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="panel" id="p-user">
     <form class="form" data-form="user">
       <label>用户贴吧主页 id<input name="tieba_uid" type="number" required placeholder="tieba_uid"></label>
+      <label>内容<select name="kind"><option value="posts">回复</option><option value="threads">主题帖</option><option value="all">全部</option></select></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
-      <button type="submit">查询回复</button>
+      <button type="submit">查询</button>
     </form>
-    <p class="hint">列出该用户的全部公开回复及原帖链接。</p>
+    <p class="hint">回复=TA 的跟帖与楼中楼；主题帖=TA 自己发的帖；全部=两者合并按时间排序。</p>
   </section>
   <section class="panel" id="p-logs">
     <form class="form" data-form="logs">
@@ -538,9 +585,11 @@ function renderThread(d){
 function renderUser(d){
   showResult({
     head:`<b>${esc(d.user.show_name)}</b> · 主页id ${d.user.tieba_uid}`,
-    items:d.replies, empty:"无回复（可能对方未公开回复，或主页 id 有误）",
-    match:r=>r.fname+" "+r.text,
-    itemHTML:r=>`<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><button class="mini locbtn" data-tid="${r.tid}" data-pid="${r.pid}" data-c="${r.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
+    items:d.replies, empty:"无内容（可能对方未公开，或主页 id 有误）",
+    match:r=>r.fname+" "+(r.text||"")+" "+(r.title||""),
+    itemHTML:r=> r.kind==="thread"
+      ? `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="spacer"></span><span>${esc(r.time)}</span><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">帖子 ↗</a></div><div class="rtext"><b>${esc(r.title)}</b></div><div class="stats">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
+      : `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><button class="mini locbtn" data-tid="${r.tid}" data-pid="${r.pid}" data-c="${r.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
   });
 }
 function renderLogs(d){
@@ -563,8 +612,14 @@ function threadText(d){
 }
 function userText(d){
   let L=[`查询用户: ${d.user.show_name} (主页id=${d.user.tieba_uid})`,""];
-  d.replies.forEach(r=>{L.push(`贴吧名: ${r.fname} 链接: ${r.link} 回复时间: ${r.time}${r.is_comment?"（楼中楼）":""}`,`   ${r.text}`);});
-  L.push("",`共 ${d.replies.length} 条回复`);return L.join("\n")+"\n";
+  d.replies.forEach(r=>{
+    if(r.kind==="thread"){
+      L.push(`[主题帖] 贴吧: ${r.fname} 时间: ${r.time} 回复:${r.reply_num} 浏览:${r.view_num}`,`   ${r.title}`,`   ${r.link}`);
+    }else{
+      L.push(`贴吧名: ${r.fname} 链接: ${r.link} 回复时间: ${r.time}${r.is_comment?"（楼中楼）":""}`,`   ${r.text}`);
+    }
+  });
+  L.push("",`共 ${d.replies.length} 条`);return L.join("\n")+"\n";
 }
 function logsText(d){
   if(!d.logs.length)return`未查询到 ${d.target} 在 ${d.fname} 的被删帖记录。\n`;
