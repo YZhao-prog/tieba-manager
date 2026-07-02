@@ -30,6 +30,33 @@ except ImportError:
     )
 
 
+def _patch_aiotieba() -> None:
+    """兼容补丁：aiotieba 4.7.1 解析吧务日志里的图片时，若图片 src 不匹配图床
+    正则，会 `None.group(1)` 崩溃（报 'NoneType' object has no attribute 'group'）。
+    这里改成不匹配时 hash 置空，避免整页查询失败。"""
+    try:
+        from aiotieba.api.get_bawu_postlogs import _classdef as m
+    except Exception:
+        return
+
+    def _safe_from_xml(data_tag):
+        img_item = data_tag.img
+        if img_item is not None:
+            src = img_item.get("original", "") or ""
+            match = m._IMAGEHASH_EXP.search(src) if src else None
+            hash_ = match.group(1) if match else ""
+        else:
+            src = ""
+            hash_ = ""
+        origin_src = data_tag.get("href", "") or ""
+        return m.Media_postlog(src, origin_src, hash_)
+
+    m.Media_postlog.from_xml = staticmethod(_safe_from_xml)
+
+
+_patch_aiotieba()
+
+
 # ======================================================================
 # 贴吧接口封装
 # ======================================================================
