@@ -262,12 +262,14 @@ async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, 
     if tid is None or pid is None:
         raise ServiceError("缺少 tid/pid。")
     tid, pid = int(tid), int(pid)
-    max_pages = min(int(max_pages), 50)  # 扫描上限，避免深帖跑太久
+    max_pages = min(int(max_pages), 50)  # 楼层页扫描上限，避免深帖跑太久
     async with _client(bduss, stoken) as client:
+        deep_floors = []  # 楼中楼数超过内联的楼层，第一遍没命中时再深挖
         pn = 1
         while pn <= max_pages:
+            # 内联抓每层前 50 条楼中楼，覆盖绝大多数情况
             posts = _check(
-                await client.get_posts(tid, pn, rn=30, with_comments=True, comment_rn=10),
+                await client.get_posts(tid, pn, rn=30, with_comments=True, comment_rn=50),
                 "定位楼层",
             )
             for post in posts.objs:
@@ -279,9 +281,29 @@ async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, 
                         if cm.pid == pid:
                             return {"found": True, "floor": post.floor, "page": pn,
                                     "url": f"https://tieba.baidu.com/p/{tid}?pid={post.pid}&cid={pid}#{pid}"}
+                    if post.reply_num > len(post.comments):
+                        deep_floors.append((pn, post.pid, post.floor))
             if not posts.has_more:
                 break
             pn += 1
+
+        # 第二遍（仅楼中楼）：对楼中楼很多的楼层逐页翻 get_comments 深挖，带请求预算
+        if is_comment:
+            budget = 40
+            for fpage, ppid, floor in deep_floors:
+                cpn = 1
+                while cpn <= 200 and budget > 0:
+                    budget -= 1
+                    cs = _check(await client.get_comments(tid, ppid, cpn), "定位楼中楼")
+                    for cm in cs.objs:
+                        if cm.pid == pid:
+                            return {"found": True, "floor": floor, "page": fpage,
+                                    "url": f"https://tieba.baidu.com/p/{tid}?pid={ppid}&cid={pid}#{pid}"}
+                    if not cs.has_more:
+                        break
+                    cpn += 1
+                if budget <= 0:
+                    break
         return {"found": False, "scanned": pn}
 
 
