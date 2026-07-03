@@ -851,6 +851,9 @@ $("#logscope").onchange=syncScope;
 // 统一入口：处理记录查询（extra 可带 op_user 或 tieba_uid）
 function runLogs(extra){
   if(!currentFname){ showErr("请先在上方输入并「进入」一个贴吧"); $("#results").hidden=false; return; }
+  // 一旦锁定某吧务（尤其是手动输入的老吧务），立即记进候选缓存，下次直接可选
+  if(extra && extra.op_user){ const n=String(extra.op_user).trim();
+    if(n && !seenOps.has(n)){ seenOps.add(n); refreshBawuList(); saveForumData(); } }
   const mp=Number($("#p-logs [name=max_pages]").value)||30;
   submit("logs", {fname:currentFname, max_pages:mp, ...extra});
 }
