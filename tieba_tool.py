@@ -570,6 +570,8 @@ padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface
 .bchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:13px;cursor:pointer}
 .bchip:hover{border-color:var(--accent);color:var(--accent)}
 .bchip .lv{font-size:11px;color:var(--muted)}
+.bchip.hist{border-style:dashed;color:var(--muted)}
+.bchip.hist:hover{color:var(--accent)}
 .watch{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .wbtn{background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:5px 14px;font-size:13px;cursor:pointer}
 .wbtn:hover{border-color:var(--accent);color:var(--accent)}
@@ -786,10 +788,15 @@ async function enterBar(){
 }
 // 「锁定吧务」候选 = secret.BAWU（你固定的名单，含已撤职）∪ 当前吧务 ∪ 记录里出现过的操作者
 let bawuNames=[], seenOps=new Set(), pinnedBawu=[], lastOverview=null;
+function historicalOps(){   // 历史/撤职：固定名单 ∪ 搜过的操作者，减去当前在册
+  const cur=new Set(bawuNames);
+  return [...new Set([...pinnedBawu,...seenOps])].filter(n=>n&&!cur.has(n)).sort((a,b)=>a.localeCompare(b,"zh"));
+}
 function refreshBawuList(){
-  const cur=new Set(bawuNames);   // 当前在册吧务
+  const cur=new Set(bawuNames);
   const all=[...new Set([...pinnedBawu,...bawuNames,...seenOps])].filter(Boolean).sort((a,b)=>a.localeCompare(b,"zh"));
-  $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}" label="${cur.has(u)?'在册吧务':'历史/撤职'}">`).join("");
+  // 只给历史/撤职的加标注；在册的不标
+  $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}"${cur.has(u)?"":' label="历史/撤职"'}>`).join("");
 }
 // 按吧持久化：概览数据 + 累计操作者（含撤职吧务），存 localStorage，下次秒出
 function fdKey(fn){ return "fd:"+(fn||currentFname); }
@@ -828,10 +835,18 @@ function renderOverview(d){
   refreshBawuList();
   const roles=d.bawu.map(r=>`<div class="brole"><div class="rt">${esc(r.role)}（${r.users.length}）</div><div class="bwrap">`+
     r.users.map(u=>`<span class="bchip" data-uname="${esc(u.user_name||u.name)}">${esc(u.name)}${u.level?`<span class="lv">Lv${u.level}</span>`:""}</span>`).join("")+`</div></div>`).join("");
+  const hist=historicalOps();
+  const histCard=
+    `<div class="fcard"><h2 style="font-size:15px;margin-bottom:12px">历史/撤职吧务（${hist.length}）· 点击查记录</h2>`+
+    `<div class="bwrap">`+
+    (hist.length ? hist.map(u=>`<span class="bchip hist" data-uname="${esc(u)}">${esc(u)}</span>`).join("")
+                 : `<span class="muted">暂无。写进 secret.py 的 BAWU、或搜过的老吧务会出现在这里。</span>`)+
+    `</div></div>`;
   $("#overview").innerHTML=
     `<div class="fcard"><h2>${esc(f.fname)}</h2><div class="muted">${esc(f.slogan||"")}</div>`+
     `<div class="fstat"><span>关注 <b>${n(f.member_num)}</b></span><span>主题帖 <b>${n(f.thread_num)}</b></span><span>回复 <b>${n(f.post_num)}</b></span><span>吧务 <b>${d.bawu_total}</b></span></div></div>`+
-    `<div class="fcard"><h2 style="font-size:15px;margin-bottom:12px">吧务列表 · 点击查看 TA 的处理记录</h2>${roles||'<p class="hint">无</p>'}</div>`;
+    `<div class="fcard"><h2 style="font-size:15px;margin-bottom:12px">吧务列表 · 点击查看 TA 的处理记录</h2>${roles||'<p class="hint">无</p>'}</div>`+
+    histCard;
 }
 $("#wsgo").onclick=enterBar;
 $("#wsbar").onkeydown=e=>{ if(e.key==="Enter")enterBar(); };
@@ -854,7 +869,8 @@ function runLogs(extra){
   if(!currentFname){ showErr("请先在上方输入并「进入」一个贴吧"); $("#results").hidden=false; return; }
   // 一旦锁定某吧务（尤其是手动输入的老吧务），立即记进候选缓存，下次直接可选
   if(extra && extra.op_user){ const n=String(extra.op_user).trim();
-    if(n && !seenOps.has(n)){ seenOps.add(n); refreshBawuList(); saveForumData(); } }
+    if(n && !seenOps.has(n)){ seenOps.add(n); refreshBawuList(); saveForumData();
+      if(lastOverview) renderOverview(lastOverview); } }   // 同步刷新概览的历史吧务区
   const mp=Number($("#p-logs [name=max_pages]").value)||30;
   submit("logs", {fname:currentFname, max_pages:mp, ...extra});
 }
