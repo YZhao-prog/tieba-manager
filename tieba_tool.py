@@ -389,16 +389,18 @@ def load_defaults() -> dict:
         stoken = stoken or getattr(secret, "STOKEN", "")
         fname = getattr(secret, "FNAME", "") or ""
         watch = getattr(secret, "WATCH", []) or []
+        bawu = getattr(secret, "BAWU", []) or []
     except ImportError:
-        pass
+        bawu = []
     fname = os.environ.get("TIEBA_FNAME", "") or fname
     # 规范化 watch 列表，容错
     clean = []
     for w in watch if isinstance(watch, (list, tuple)) else []:
         if isinstance(w, dict) and w.get("uid"):
             clean.append({"label": str(w.get("label") or w["uid"]), "uid": w["uid"]})
+    bawu = [str(x).strip() for x in bawu if str(x).strip()] if isinstance(bawu, (list, tuple)) else []
     return {"bduss": bduss.strip(), "stoken": stoken.strip(),
-            "fname": fname.strip(), "watch": clean}
+            "fname": fname.strip(), "watch": clean, "bawu": bawu}
 
 
 DEFAULTS = load_defaults()
@@ -782,10 +784,10 @@ async function enterBar(){
     else $("#wsinfo").textContent="✓ "+f+"（用缓存，刷新失败）";
   }
 }
-// 「锁定吧务」候选 = 当前吧务 ∪ 记录里出现过的操作者（含已撤的吧务）
-let bawuNames=[], seenOps=new Set(), lastOverview=null;
+// 「锁定吧务」候选 = secret.BAWU（你固定的名单，含已撤职）∪ 当前吧务 ∪ 记录里出现过的操作者
+let bawuNames=[], seenOps=new Set(), pinnedBawu=[], lastOverview=null;
 function refreshBawuList(){
-  const all=[...new Set([...bawuNames,...seenOps])].filter(Boolean).sort((a,b)=>a.localeCompare(b,"zh"));
+  const all=[...new Set([...pinnedBawu,...bawuNames,...seenOps])].filter(Boolean).sort((a,b)=>a.localeCompare(b,"zh"));
   $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}">`).join("");
 }
 // 按吧持久化：概览数据 + 累计操作者（含撤职吧务），存 localStorage，下次秒出
@@ -1136,6 +1138,7 @@ async function init(){
   currentFname=def.fname||currentFname||"";   // secret.py 的 FNAME 优先，否则用本地记忆的
   $("#wsbar").value=currentFname;
   renderWatch(def.watch||[]);                  // 常查发言对象 → 快捷按钮
+  pinnedBawu=def.bawu||[]; refreshBawuList();   // 固定吧务名单（含已撤职）→ 锁定候选
   // 预载缓存：概览秒出、锁定吧务候选（含已见过的撤职吧务）立即可用
   if(currentFname){
     const cached=loadForumData(currentFname);
