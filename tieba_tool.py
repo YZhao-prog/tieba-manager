@@ -616,6 +616,11 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .optag.ban{background:#3a1418;color:#ffb4b4;border-color:#5a2228}
 .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)}
 .tlabel{font-size:12px;color:var(--muted)}
+.catpills{display:inline-flex;gap:6px;flex-wrap:wrap}
+.pill{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:20px;padding:4px 12px;font-size:12.5px;cursor:pointer}
+.pill:hover{border-color:var(--accent)}
+.pill.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pill .pc{opacity:.7;margin-left:4px}
 .box{margin-top:24px;padding:16px 18px;border-radius:var(--r);display:flex;align-items:center;gap:12px;font-size:14px}
 .loading{background:var(--surface);border:1px solid var(--border);color:var(--muted)}
 .error{background:#2a1416;border:1px solid #52262a;color:#ffb4b4;white-space:pre-wrap}
@@ -698,6 +703,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
       <span class="tlabel" id="catbyLabel" hidden>分类</span>
       <select id="catby" class="barsel" hidden><option value="op_type">按操作类型</option><option value="op_user">按吧务</option><option value="target">按被处理人</option></select>
       <span class="catbox" id="catbox" hidden><input id="catfilter" class="barsel" placeholder="筛选，可搜" autocomplete="off"><div class="catmenu" id="catmenu" hidden></div></span>
+      <span class="catpills" id="catpills" hidden></span>
       <span class="tlabel" id="sortLabel" hidden>排序</span>
       <select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select>
       <input id="search" class="search" placeholder="搜索文本…">
@@ -754,11 +760,12 @@ function switchTab(name){
   $("#p-"+name).classList.add("active");
   streamToken++;view=null;catFilter="";sortMode="new";hideRes();
 }
-// 点标签：处理记录直接出默认（全吧最近），不用再点搜索
+// 点标签：处理记录直接出默认（全吧最近）；概览则刷新历史吧务区（吸收新查到的老吧务）
 $$(".tab").forEach(tab=>tab.onclick=()=>{
   const name=tab.dataset.tab;
   switchTab(name);
   if(name==="logs" && currentFname){ $("#logscope").value="whole"; syncScope(); runLogs({}); }
+  if(name==="overview" && lastOverview) renderOverview(lastOverview);
 });
 
 async function enterBar(){
@@ -867,10 +874,7 @@ $("#logscope").onchange=syncScope;
 // 统一入口：处理记录查询（extra 可带 op_user 或 tieba_uid）
 function runLogs(extra){
   if(!currentFname){ showErr("请先在上方输入并「进入」一个贴吧"); $("#results").hidden=false; return; }
-  // 一旦锁定某吧务（尤其是手动输入的老吧务），立即记进候选缓存，下次直接可选
-  if(extra && extra.op_user){ const n=String(extra.op_user).trim();
-    if(n && !seenOps.has(n)){ seenOps.add(n); refreshBawuList(); saveForumData();
-      if(lastOverview) renderOverview(lastOverview); } }   // 同步刷新概览的历史吧务区
+  // 不在这里加缓存：只有查到结果（harvestOps 从实际记录里收集）才记，避免搜错名/无结果也被加
   const mp=Number($("#p-logs [name=max_pages]").value)||30;
   submit("logs", {fname:currentFname, max_pages:mp, ...extra});
 }
@@ -927,11 +931,22 @@ function updateCatFilter(){
   // 按类别名排序（不按数量），便于稳定查找
   catOptions=Object.keys(agg).sort((a,b)=>a.localeCompare(b,"zh")).map(n=>({name:n,...agg[n]}));
   catTotal=view.items.length;
-  $("#catfilter").placeholder=`${catLabelText()}（${catTotal}），可搜`;
-  box.hidden=false;
-  if(!$("#catmenu").hidden) renderCatMenu($("#catfilter").value);  // 菜单开着就刷新
+  // 选项少（如锁定吧务后的“操作类型”）→ 直接铺成可点小按钮；多 → 用可搜下拉
+  if(catOptions.length<=8){
+    box.hidden=true; $("#catmenu").hidden=true; $("#catpills").hidden=false;
+    renderCatPills();
+  }else{
+    $("#catpills").hidden=true; box.hidden=false;
+    $("#catfilter").placeholder=`${catLabelText()}（${catTotal}），可搜`;
+    if(!$("#catmenu").hidden) renderCatMenu($("#catfilter").value);
+  }
 }
 function catCnt(o){ return view.formKind==="user" ? `${o.reply}回·${o.thread}帖` : `${o.count}`; }
+function renderCatPills(){
+  $("#catpills").innerHTML=
+    `<span class="pill${catFilter?"":" on"}" data-v="">${catLabelText()}<span class="pc">${catTotal}</span></span>`+
+    catOptions.map(o=>`<span class="pill${o.name===catFilter?" on":""}" data-v="${esc(o.name)}">${esc(o.name)}<span class="pc">${catCnt(o)}</span></span>`).join("");
+}
 function renderCatMenu(text){
   const t=(text||"").trim().toLowerCase();
   const opts=catOptions.filter(o=>o.name.toLowerCase().includes(t));
@@ -953,7 +968,7 @@ function applyView(){
   if(SORTABLE[view.formKind]){ base.sort((a,b)=> sortMode==="old" ? a.ts-b.ts : b.ts-a.ts); $("#sortsel").hidden=false; }
   else $("#sortsel").hidden=true;
   // 工具条标签随控件显隐
-  $("#catbyLabel").hidden = $("#catby").hidden && $("#catbox").hidden;
+  $("#catbyLabel").hidden = $("#catby").hidden && $("#catbox").hidden && $("#catpills").hidden;
   $("#sortLabel").hidden = $("#sortsel").hidden;
   // 分类筛选
   const field=catField();
@@ -1052,6 +1067,7 @@ $("#catfilter").oninput=e=>{catFilter=e.target.value.trim();page=1;applyView();r
 $("#catfilter").onfocus=e=>{e.target.select();renderCatMenu("");};  // 点开显示全部选项，便于换选
 $("#catby").onchange=e=>{logCatBy=e.target.value;catFilter="";$("#catfilter").value="";page=1;applyView()};
 $("#catmenu").onclick=e=>{const o=e.target.closest(".opt"); if(o)pickCat(o.dataset.v)};
+$("#catpills").onclick=e=>{const p=e.target.closest(".pill"); if(p){catFilter=p.dataset.v;page=1;applyView();}};
 document.addEventListener("click",e=>{ if(!e.target.closest("#catbox")) $("#catmenu").hidden=true; });
 $("#sortsel").onchange=e=>{sortMode=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
@@ -1124,7 +1140,7 @@ function buildHTML(){
 }
 
 // 结果区
-function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true;$("#loading").hidden=true;$("#toolbar").hidden=true;$("#catmenu").hidden=true}
+function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true;$("#loading").hidden=true;$("#toolbar").hidden=true;$("#catmenu").hidden=true;$("#catpills").hidden=true}
 function load(on){$("#loading").hidden=!on}
 function setLoad(n){$("#loading").hidden=false;$("#loadmsg").textContent=n?`加载中… 已 ${n} 条`:"加载中…";}
 function showErr(m){const e=$("#error");e.textContent="出错了："+m;e.hidden=false}
