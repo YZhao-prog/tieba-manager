@@ -291,42 +291,51 @@ async def _fill_targets(client, portraits, pcache):
         pcache.update(await _resolve_names(client, need))
 
 
-async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30, **_):
-    """吧务处理记录：合并帖子操作（删贴）与用户操作（封禁等）。
-    被查询人 id 留空 = 全吧最近记录；填了 = 只看该用户。"""
+async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, op_user=None, max_pages=30, **_):
+    """吧务处理记录：合并帖子操作（删贴）与用户操作（封禁等）。三种模式：
+    op_user  = 只看该吧务的操作（服务端按操作者精确检索，用于「锁定吧务」）；
+    tieba_uid= 只看该被处理人；
+    都留空   = 全吧最近记录。"""
     if not fname:
         raise ServiceError("请填写贴吧名。")
     if not stoken:
         raise ServiceError("查询吧务处理记录需要 STOKEN，请在页面顶部填写。")
     max_pages = _cap_pages(max_pages)
-    single = _has_uid(tieba_uid)
+    op_user = (op_user or "").strip()
     async with _client(bduss, stoken) as client:
-        search_value, target = "", "最近处理记录"
-        if single:
+        if op_user:                              # 锁定某吧务：按操作者检索
+            mode, who = "op", op_user
+            stype, sval, fixed_target = BawuSearchType.OP, op_user, None
+        elif _has_uid(tieba_uid):                # 锁定某被处理人：按用户检索
             user = await _resolve_user(client, tieba_uid)
             if not user.user_name:
                 raise ServiceError("该用户没有用户名（仅有昵称），无法按用户名检索；可留空查全吧最近记录。")
-            search_value, target = user.user_name, _name(user)
-        yield {"type": "head", "head": {"target": target, "fname": fname, "whole": not single}}
+            mode, who = "target", _name(user)
+            stype, sval, fixed_target = BawuSearchType.USER, user.user_name, _name(user)
+        else:                                    # 全吧最近
+            mode, who = "whole", ""
+            stype, sval, fixed_target = BawuSearchType.USER, "", None
+        yield {"type": "head", "head": {"mode": mode, "who": who, "fname": fname}}
         pcache = {}
+
+        def err_302(err):
+            if "302" in str(err):
+                raise ServiceError(
+                    "吧务处理记录鉴权失败（302）。请检查：①STOKEN 要用 .tieba.baidu.com 域下的那个；"
+                    "②贴吧名要填完整（部分吧名本身带“吧”字，如「yy小说吧」）；③当前账号须是该吧吧务。")
+            raise ServiceError(f"获取吧务处理记录失败：{err}")
 
         # 1) 帖子操作（删贴等）
         pn = 1
         while pn <= max_pages:
-            res = await client.get_bawu_postlogs(
-                fname, pn, search_value=search_value, search_type=BawuSearchType.USER)
+            res = await client.get_bawu_postlogs(fname, pn, search_value=sval, search_type=stype)
             if getattr(res, "err", None) is not None:
-                if "302" in str(res.err):
-                    raise ServiceError(
-                        "吧务处理记录鉴权失败（302）。请检查：①STOKEN 要用 .tieba.baidu.com 域下的那个；"
-                        "②贴吧名要填完整（部分吧名本身带“吧”字，如「yy小说吧」）；③当前账号须是该吧吧务。"
-                    )
-                raise ServiceError(f"获取吧务处理记录失败：{res.err}")
-            if not single:
+                err_302(res.err)
+            if fixed_target is None:
                 await _fill_targets(client, [x.post_portrait for x in res.objs], pcache)
             items = [{
                 "op_type": x.op_type, "op_user": x.op_user_name,
-                "target": target if single else pcache.get(x.post_portrait, ""),
+                "target": fixed_target if fixed_target is not None else pcache.get(x.post_portrait, ""),
                 "op_time": str(x.op_time), "ts": _op_ts(x.op_time),
                 "title": x.title, "text": x.text,
             } for x in res.objs]
@@ -340,17 +349,16 @@ async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages
         pn = 1
         while pn <= max_pages:
             try:
-                res = await client.get_bawu_userlogs(
-                    fname, pn, search_value=search_value, search_type=BawuSearchType.USER)
+                res = await client.get_bawu_userlogs(fname, pn, search_value=sval, search_type=stype)
             except Exception:
                 break
             if getattr(res, "err", None) is not None:
                 break
-            if not single:
+            if fixed_target is None:
                 await _fill_targets(client, [x.user_portrait for x in res.objs], pcache)
             items = [{
                 "op_type": x.op_type, "op_user": x.op_user_name,
-                "target": target if single else pcache.get(x.user_portrait, ""),
+                "target": fixed_target if fixed_target is not None else pcache.get(x.user_portrait, ""),
                 "op_time": str(x.op_time), "ts": _op_ts(x.op_time),
                 "duration": getattr(x, "op_duration", 0),
             } for x in res.objs]
@@ -713,14 +721,18 @@ async function api(url,body){
 
 // ---- 工作台：先选定要管理的吧 ----
 let currentFname=localStorage.fname||"";
-let pendingLogFilter=null;
 function switchTab(name){
   $$(".tab").forEach(t=>t.classList.toggle("active", t.dataset.tab===name));
   $$(".panel").forEach(p=>p.classList.remove("active"));
   $("#p-"+name).classList.add("active");
   streamToken++;view=null;catFilter="";sortMode="new";hideRes();
 }
-$$(".tab").forEach(tab=>tab.onclick=()=>switchTab(tab.dataset.tab));
+// 点标签：处理记录直接出默认（全吧最近），不用再点搜索
+$$(".tab").forEach(tab=>tab.onclick=()=>{
+  const name=tab.dataset.tab;
+  switchTab(name);
+  if(name==="logs" && currentFname) runLogs({});
+});
 
 async function enterBar(){
   const f=$("#wsbar").value.trim();
@@ -748,19 +760,17 @@ function renderOverview(d){
 }
 $("#wsgo").onclick=enterBar;
 $("#wsbar").onkeydown=e=>{ if(e.key==="Enter")enterBar(); };
+// 点概览里的吧务名字 → 锁定该吧务（服务端只查 TA 的记录）
 $("#overview").addEventListener("click",e=>{
   const c=e.target.closest(".bchip"); if(!c)return;
-  pendingLogFilter={by:"op_user", val:c.dataset.uname};
   switchTab("logs");
-  const form=$("#p-logs form");
-  form.requestSubmit?form.requestSubmit():form.dispatchEvent(new Event("submit",{cancelable:true}));
+  runLogs({op_user:c.dataset.uname});
 });
-function applyPending(){
-  if(pendingLogFilter && view && view.formKind==="logs"){
-    logCatBy=pendingLogFilter.by; catFilter=pendingLogFilter.val;
-    $("#catby").value=logCatBy; $("#catfilter").value=catFilter;
-  }
-  pendingLogFilter=null;
+// 统一入口：处理记录查询（extra 可带 op_user 或 tieba_uid）
+function runLogs(extra){
+  if(!currentFname){ showErr("请先在上方输入并「进入」一个贴吧"); $("#results").hidden=false; return; }
+  const mp=Number($("#p-logs [name=max_pages]").value)||30;
+  submit("logs", {fname:currentFname, max_pages:mp, ...extra});
 }
 
 // ---- 渲染配置（流式累积；itemHTML/match/head/empty 与数据分离）----
@@ -775,7 +785,9 @@ function catLabelText(){return view.formKind==="user"?"全部吧"
 const RENDER={
   logs:{
     empty:"无吧务处理记录",
-    head:m=> m.whole ? `最近处理记录 · 吧 <b>${esc(m.fname)}</b>` : `被处理人 <b>${esc(m.target)}</b> · 吧 ${esc(m.fname)}`,
+    head:m=> m.mode==="op" ? `🔒 吧务 <b>${esc(m.who)}</b> 的操作 · ${esc(m.fname)}`
+           : m.mode==="target" ? `被处理人 <b>${esc(m.who)}</b> · ${esc(m.fname)}`
+           : `最近处理记录 · <b>${esc(m.fname)}</b>`,
     match:x=>(x.op_type||"")+" "+(x.op_user||"")+" "+(x.target||"")+" "+(x.title||"")+" "+(x.text||""),
     itemHTML:x=>{
       const ban=x.duration!==undefined;
@@ -810,7 +822,8 @@ function updateCatFilter(){
   const agg={};
   view.items.forEach(it=>{ const k=catVal(it,field); const a=agg[k]||(agg[k]={count:0,reply:0,thread:0});
     a.count++; if(it.kind==="thread")a.thread++; else a.reply++; });
-  catOptions=Object.keys(agg).sort((a,b)=>agg[b].count-agg[a].count).map(n=>({name:n,...agg[n]}));
+  // 按类别名排序（不按数量），便于稳定查找
+  catOptions=Object.keys(agg).sort((a,b)=>a.localeCompare(b,"zh")).map(n=>({name:n,...agg[n]}));
   catTotal=view.items.length;
   $("#catfilter").placeholder=`${catLabelText()}（${catTotal}），可搜`;
   box.hidden=false;
@@ -882,7 +895,7 @@ async function submit(formKind, body){
   if(cache.has(key)){
     const snap=cache.get(key);
     view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
-    resetControls(); applyPending(); $("#results").hidden=false; load(false); applyView();
+    resetControls(); $("#results").hidden=false; load(false); applyView();
     return;
   }
   view={rc:f.rc, formKind, meta:null, items:[], done:false};
@@ -898,7 +911,7 @@ async function submit(formKind, body){
     });
   }catch(e){ if(token===streamToken) errMsg=e.message; }
   if(token!==streamToken)return;   // 已被新查询取代
-  load(false); view.done=true; applyPending(); applyView();
+  load(false); view.done=true; applyView();
   if(errMsg){ showErr(errMsg); if(!view.items.length)$("#results").hidden=true; }
   else cache.set(key,{meta:view.meta, items:view.items.slice()});
 }
@@ -908,12 +921,11 @@ $$(".form").forEach(form=>form.onsubmit=async e=>{
   if(!cred.bduss){showErr("请先在右上角填写 BDUSS 并登录");return;}
   const kind=form.dataset.form, body={};
   new FormData(form).forEach((v,k)=>body[k]=form.elements[k].type==="number"?Number(v):v);
-  if(kind==="logs"){  // 处理记录属于“当前吧”上下文；用户发言是跨吧的，不需要
-    if(!currentFname){showErr("请先在上方输入并「进入」一个贴吧");return;}
-    body.fname=currentFname;
-  }
   const btn=$("button[type=submit]",form); btn.disabled=true;
-  try{ await submit(kind, body); } finally{ btn.disabled=false; }
+  try{
+    if(kind==="logs") runLogs(body.tieba_uid?{tieba_uid:body.tieba_uid}:{});  // 处理记录走统一入口
+    else await submit(kind, body);
+  } finally{ btn.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
 // 分类可搜索下拉
@@ -930,7 +942,8 @@ $("#jump").onchange=e=>{const n=Number(e.target.value); if(n>=1){page=n;applyVie
 
 // 导出文本
 function logsText(d){
-  let L=[`吧务处理记录 · 吧: ${d.fname}`+(d.whole?"（全吧最近）":` · 被处理人: ${d.target}`),""];
+  const cap=d.mode==="op"?` · 吧务 ${d.who} 的操作`:d.mode==="target"?` · 被处理人 ${d.who}`:"（全吧最近）";
+  let L=[`吧务处理记录 · 吧: ${d.fname}${cap}`,""];
   if(!d.logs.length)L.push("（无记录）");
   d.logs.forEach(x=>{
     L.push(`【${x.op_type}】吧务 ${x.op_user}${x.target?` · 被处理 ${x.target}`:""}${x.duration!==undefined&&x.duration?` · ${x.duration}天`:""} · ${x.op_time}`);
@@ -952,7 +965,7 @@ function currentText(){
   if(!view||!view.meta)return "";
   const m=view.meta;
   if(view.formKind==="user") return userText({show_name:m.show_name,tieba_uid:m.tieba_uid,items:view.items});
-  return logsText({target:m.target,fname:m.fname,whole:m.whole,logs:view.items});
+  return logsText({mode:m.mode,who:m.who,fname:m.fname,logs:view.items});
 }
 
 // 导出为独立网页（自包含，可直接发给别人用浏览器打开）
@@ -978,8 +991,9 @@ function buildHTML(){
       ? `<div class="card"><div class="hd"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="t">${esc(r.time)}</span>${A(r.link,"帖子↗")}</div><div class="ttl">${esc(r.title)}</div><div class="st">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
       : `<div class="card"><div class="hd"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="t">${esc(r.time)}</span>${A(r.link,"原帖↗")}</div><div class="tx">${esc(r.text)}</div></div>`).join("");
   }else{
-    title=m.whole?`${esc(m.fname)} 吧务处理记录`:`${esc(m.target)} 的吧务处理记录`;
-    sub=`吧 ${esc(m.fname)}${m.whole?"（全吧最近）":""} · 共 ${items.length} 条`;
+    const cap=m.mode==="op"?`吧务 ${esc(m.who)} 的操作记录`:m.mode==="target"?`${esc(m.who)} 被处理记录`:`${esc(m.fname)} 吧务处理记录`;
+    title=cap;
+    sub=`吧 ${esc(m.fname)}${m.mode==="whole"?"（全吧最近）":""} · 共 ${items.length} 条`;
     rows=items.map(x=>{
       const ban=x.duration!==undefined;
       const hd=`<div class="hd"><span class="optag">${esc(x.op_type)}</span>吧务 ${esc(x.op_user)}${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}${ban&&x.duration?`<span class="tag">${x.duration}天</span>`:""}<span class="t">${esc(x.op_time)}</span></div>`;
