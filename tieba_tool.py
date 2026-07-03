@@ -606,6 +606,12 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .search:focus{outline:none;border-color:var(--accent)}
 .barsel{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 10px;font-size:13px;max-width:180px}
 .barsel:focus{outline:none;border-color:var(--accent)}
+.catbox{position:relative;display:inline-block}
+.catmenu{position:absolute;top:100%;left:0;z-index:30;margin-top:4px;min-width:200px;max-height:260px;overflow:auto;background:var(--surface2);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.catmenu .opt{padding:7px 12px;font-size:13px;cursor:pointer;display:flex;justify-content:space-between;gap:16px;white-space:nowrap}
+.catmenu .opt:hover{background:var(--surface)}
+.catmenu .opt.sel{color:var(--accent)}
+.catmenu .cnt{color:var(--muted)}
 .form .chk{flex-direction:row;align-items:center;gap:7px;flex:0 0 auto;cursor:pointer}
 .form .chk input{width:auto}
 .pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 18px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px;color:var(--muted)}
@@ -671,7 +677,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><input id="catfilter" class="barsel" list="catlist" hidden placeholder="按吧名筛选"><datalist id="catlist"></datalist><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
+      <div class="ract"><span class="catbox" id="catbox" hidden><input id="catfilter" class="barsel" placeholder="全部吧，可搜" autocomplete="off"><div class="catmenu" id="catmenu" hidden></div></span><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
     </div>
     <div id="rbody"></div>
     <div class="pager" id="pager" hidden>
@@ -773,16 +779,30 @@ const FLOW={
 };
 
 function catVal(it,field){ return it[field]||"(空)"; }
+let catOptions=[], catTotal=0;   // 当前分类选项 [{name,count}]
 function updateCatFilter(){
-  // 分类（可搜索）：用户发言→按吧名，关键字搜索→按发帖人；输入框 + datalist 联想
-  const cf=$("#catfilter"), dl=$("#catlist"), field=CATFIELD[view.formKind];
+  // 分类可搜索下拉：用户发言→按吧名，关键字搜索→按发帖人
+  const box=$("#catbox"), field=CATFIELD[view.formKind];
   const names=field?[...new Set(view.items.map(it=>catVal(it,field)))]:[];
-  if(!field||names.length<2){ cf.hidden=true; dl.innerHTML=""; return; }
+  if(!field||names.length<2){ box.hidden=true; $("#catmenu").hidden=true; catOptions=[]; return; }
   const counts={}; view.items.forEach(it=>counts[catVal(it,field)]=(counts[catVal(it,field)]||0)+1);
   names.sort((a,b)=>counts[b]-counts[a]);
-  dl.innerHTML=names.map(n=>`<option value="${esc(n)}" label="${counts[n]} 条">`).join("");
-  cf.placeholder=`${CATLABEL[view.formKind]}（${view.items.length}），可搜`;
-  cf.hidden=false;
+  catOptions=names.map(n=>({name:n,count:counts[n]}));
+  catTotal=view.items.length;
+  $("#catfilter").placeholder=`${CATLABEL[view.formKind]}（${catTotal}），可搜`;
+  box.hidden=false;
+  if(!$("#catmenu").hidden) renderCatMenu($("#catfilter").value);  // 菜单开着就刷新
+}
+function renderCatMenu(text){
+  const t=(text||"").trim().toLowerCase();
+  const opts=catOptions.filter(o=>o.name.toLowerCase().includes(t));
+  const menu=$("#catmenu");
+  menu.innerHTML=`<div class="opt${catFilter?"":" sel"}" data-v="">全部（${catTotal}）</div>`+
+    opts.map(o=>`<div class="opt${o.name===catFilter?" sel":""}" data-v="${esc(o.name)}"><span>${esc(o.name)}</span><span class="cnt">${o.count}</span></div>`).join("");
+  menu.hidden=false;
+}
+function pickCat(v){
+  catFilter=v; $("#catfilter").value=v; $("#catmenu").hidden=true; page=1; applyView();
 }
 function applyView(){
   if(!view)return;
@@ -809,7 +829,7 @@ function applyView(){
   else pager.hidden=true;
 }
 
-function resetControls(){ query="";catFilter="";sortMode="new";page=1;$("#search").value="";$("#sortsel").value="new";$("#catfilter").value=""; }
+function resetControls(){ query="";catFilter="";sortMode="new";page=1;$("#search").value="";$("#sortsel").value="new";$("#catfilter").value="";$("#catmenu").hidden=true; }
 
 // 逐行读取 NDJSON 流
 async function streamNDJSON(url,body,onChunk){
@@ -877,7 +897,11 @@ $("#rbody").addEventListener("click",async e=>{
   }catch(err){ b.textContent="查询失败"; b.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
-$("#catfilter").oninput=e=>{catFilter=e.target.value.trim();page=1;applyView()};
+// 分类可搜索下拉
+$("#catfilter").oninput=e=>{catFilter=e.target.value.trim();page=1;applyView();renderCatMenu(e.target.value)};
+$("#catfilter").onfocus=e=>renderCatMenu(e.target.value);
+$("#catmenu").onclick=e=>{const o=e.target.closest(".opt"); if(o)pickCat(o.dataset.v)};
+document.addEventListener("click",e=>{ if(!e.target.closest("#catbox")) $("#catmenu").hidden=true; });
 $("#sortsel").onchange=e=>{sortMode=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
 $("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
