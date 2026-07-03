@@ -12,7 +12,7 @@
 功能：
     主题帖爬取     全楼层 + 楼中楼，大帖秒级返回
     用户发言查询   回复 / 主题帖 / 全部，附「查楼层」精确定位
-    吧务处理记录   某用户被吧务处理（删贴等）的记录（需 STOKEN，吧名带“吧”字）
+    吧务处理记录   某用户被吧务处理（删贴等）的记录（需 STOKEN，吧名填完整名）
 结果均支持文本搜索、翻页、复制、下载 txt。封禁功能暂不提供。
 """
 
@@ -280,7 +280,7 @@ async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages
                 if "302" in str(res.err):
                     raise ServiceError(
                         "吧务处理记录鉴权失败（302）。请检查：①STOKEN 要用 .tieba.baidu.com 域下的那个；"
-                        "②贴吧名需带“吧”字（如「yy小说吧」）；③当前账号须是该吧吧务。"
+                        "②贴吧名要填完整（部分吧名本身带“吧”字，如「yy小说吧」）；③当前账号须是该吧吧务。"
                     )
                 raise ServiceError(f"获取吧务处理记录失败：{res.err}")
             items = [{
@@ -592,6 +592,8 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .tag2{background:#123a1d;color:#b6f0c0;border:1px solid #1c5a2c;border-radius:4px;padding:1px 6px;font-size:11px}
 .stats{font-size:12px;color:var(--muted);margin-top:4px}
 .form select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:10px 12px;font-size:14px}
+.no-spin::-webkit-outer-spin-button,.no-spin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.no-spin{-moz-appearance:textfield;appearance:textfield}
 .rtext{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin-top:6px;font-size:14px}
 .ltitle{font-weight:500;margin-top:6px}.ltext{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);margin-top:4px;font-size:13.5px}
 .optag{background:#3a2a12;color:#ffd7a8;border:1px solid #5a3f1c;border-radius:4px;padding:1px 6px;font-size:11px}
@@ -632,7 +634,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
 <main>
   <section class="panel active" id="p-thread">
     <form class="form" data-form="thread">
-      <label>主题帖 tid<input name="tid" type="number" required placeholder="帖子链接中的数字"></label>
+      <label>主题帖 tid<input name="tid" type="number" class="no-spin" required placeholder="帖子链接中的数字"></label>
       <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
       <button type="submit">开始爬取</button>
     </form>
@@ -640,7 +642,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   </section>
   <section class="panel" id="p-user">
     <form class="form" data-form="user">
-      <label>用户贴吧主页 id<input name="tieba_uid" type="number" required placeholder="个人主页链接中的数字"></label>
+      <label>用户贴吧主页 id<input name="tieba_uid" type="number" class="no-spin" required placeholder="个人主页链接中的数字"></label>
       <label>内容<select name="kind"><option value="posts">回复</option><option value="threads">主题帖</option><option value="all">全部</option></select></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询</button>
@@ -649,7 +651,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   </section>
   <section class="panel" id="p-search">
     <form class="form" data-form="search">
-      <label>贴吧名（带“吧”字）<input name="fname" type="text" required placeholder="如 yy小说吧"></label>
+      <label>贴吧名<input name="fname" type="text" required placeholder="如 lol、yy小说吧"></label>
       <label>关键字<input name="query" type="text" required placeholder="要搜索的词"></label>
       <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
       <label class="chk"><input name="only_thread" type="checkbox"> 只看主题帖</label>
@@ -659,17 +661,17 @@ main{max-width:960px;margin:0 auto;padding:24px}
   </section>
   <section class="panel" id="p-logs">
     <form class="form" data-form="logs">
-      <label>贴吧名（带“吧”字）<input name="fname" type="text" required placeholder="如 yy小说吧"></label>
-      <label>被查询人主页 id<input name="tieba_uid" type="number" required placeholder="个人主页链接中的数字"></label>
+      <label>贴吧名<input name="fname" type="text" required placeholder="如 lol、yy小说吧"></label>
+      <label>被查询人主页 id<input name="tieba_uid" type="number" class="no-spin" required placeholder="个人主页链接中的数字"></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询记录</button>
     </form>
-    <p class="hint">查该用户在本吧被吧务处理（删贴等）的记录。需 STOKEN（.tieba.baidu.com 域）；吧名带“吧”字；账号须为该吧吧务。</p>
+    <p class="hint">查该用户在本吧被吧务处理（删贴等）的记录。需 STOKEN（.tieba.baidu.com 域）；吧名填完整（部分吧名本身含“吧”字）；账号须为该吧吧务。</p>
   </section>
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><select id="catfilter" class="barsel" hidden></select><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
+      <div class="ract"><input id="catfilter" class="barsel" list="catlist" hidden placeholder="按吧名筛选"><datalist id="catlist"></datalist><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
     </div>
     <div id="rbody"></div>
     <div class="pager" id="pager" hidden>
@@ -772,16 +774,15 @@ const FLOW={
 
 function catVal(it,field){ return it[field]||"(空)"; }
 function updateCatFilter(){
-  // 分类下拉：用户发言→按贴吧，关键字搜索→按发帖人
-  const cf=$("#catfilter"), field=CATFIELD[view.formKind];
+  // 分类（可搜索）：用户发言→按吧名，关键字搜索→按发帖人；输入框 + datalist 联想
+  const cf=$("#catfilter"), dl=$("#catlist"), field=CATFIELD[view.formKind];
   const names=field?[...new Set(view.items.map(it=>catVal(it,field)))]:[];
-  if(!field||names.length<2){ cf.hidden=true; catFilter=""; return; }
+  if(!field||names.length<2){ cf.hidden=true; dl.innerHTML=""; return; }
   const counts={}; view.items.forEach(it=>counts[catVal(it,field)]=(counts[catVal(it,field)]||0)+1);
   names.sort((a,b)=>counts[b]-counts[a]);
-  cf.innerHTML=`<option value="">${CATLABEL[view.formKind]} (${view.items.length})</option>`+
-    names.map(n=>`<option value="${esc(n)}">${esc(n)} (${counts[n]})</option>`).join("");
-  if(!counts[catFilter]) catFilter="";       // 选中项在增量中还没出现/消失
-  cf.value=catFilter; cf.hidden=false;
+  dl.innerHTML=names.map(n=>`<option value="${esc(n)}" label="${counts[n]} 条">`).join("");
+  cf.placeholder=`${CATLABEL[view.formKind]}（${view.items.length}），可搜`;
+  cf.hidden=false;
 }
 function applyView(){
   if(!view)return;
@@ -793,7 +794,7 @@ function applyView(){
   else $("#sortsel").hidden=true;
   // 分类筛选
   const field=CATFIELD[view.formKind];
-  if(field && catFilter) base=base.filter(it=>catVal(it,field)===catFilter);
+  if(field && catFilter){const cf=catFilter.toLowerCase(); base=base.filter(it=>catVal(it,field).toLowerCase().includes(cf));}
   // 文本搜索
   const q=query.trim().toLowerCase();
   const items=q?base.filter(it=>rc.match(it).toLowerCase().includes(q)):base;
@@ -808,7 +809,7 @@ function applyView(){
   else pager.hidden=true;
 }
 
-function resetControls(){ query="";catFilter="";sortMode="new";page=1;$("#search").value="";$("#sortsel").value="new"; }
+function resetControls(){ query="";catFilter="";sortMode="new";page=1;$("#search").value="";$("#sortsel").value="new";$("#catfilter").value=""; }
 
 // 逐行读取 NDJSON 流
 async function streamNDJSON(url,body,onChunk){
@@ -876,7 +877,7 @@ $("#rbody").addEventListener("click",async e=>{
   }catch(err){ b.textContent="查询失败"; b.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
-$("#catfilter").onchange=e=>{catFilter=e.target.value;page=1;applyView()};
+$("#catfilter").oninput=e=>{catFilter=e.target.value.trim();page=1;applyView()};
 $("#sortsel").onchange=e=>{sortMode=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
 $("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
