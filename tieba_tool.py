@@ -12,7 +12,7 @@
 功能：
     用户发言查询   回复 / 主题帖 / 全部，可按贴吧分类，附「查楼层」精确定位
     关键字搜索     吧内按内容搜索，可按发帖人分类
-    吧务处理记录   全吧最近记录或指定用户，可按吧务/被处理人分类（需 STOKEN）
+    吧务处理记录   全吧最近记录或指定用户，合并删贴+封禁，可按操作类型/吧务/被处理人分类（需 STOKEN）
 结果均支持流式加载、文本搜索、翻页、复制、下载 txt、导出网页。
 """
 
@@ -239,8 +239,22 @@ def _has_uid(tieba_uid) -> bool:
     return tieba_uid not in (None, "", 0, "0")
 
 
+def _op_ts(dt) -> int:
+    try:
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+async def _fill_targets(client, portraits, pcache):
+    need = list(dict.fromkeys(p for p in portraits if p and p not in pcache))
+    if need:
+        pcache.update(await _resolve_names(client, need))
+
+
 async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages=30, **_):
-    """被查询人 id 留空 = 全吧最近处理记录；填了 = 只看该用户。"""
+    """吧务处理记录：合并帖子操作（删贴）与用户操作（封禁等）。
+    被查询人 id 留空 = 全吧最近记录；填了 = 只看该用户。"""
     if not fname:
         raise ServiceError("请填写贴吧名。")
     if not stoken:
@@ -256,6 +270,8 @@ async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages
             search_value, target = user.user_name, _name(user)
         yield {"type": "head", "head": {"target": target, "fname": fname, "whole": not single}}
         pcache = {}
+
+        # 1) 帖子操作（删贴等）
         pn = 1
         while pn <= max_pages:
             res = await client.get_bawu_postlogs(
@@ -267,22 +283,44 @@ async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages
                         "②贴吧名要填完整（部分吧名本身带“吧”字，如「yy小说吧」）；③当前账号须是该吧吧务。"
                     )
                 raise ServiceError(f"获取吧务处理记录失败：{res.err}")
-            if not single:  # 全吧模式：解析每条的被处理人（唯一 portrait 缓存）
-                need = list(dict.fromkeys(
-                    x.post_portrait for x in res.objs if x.post_portrait and x.post_portrait not in pcache))
-                if need:
-                    pcache.update(await _resolve_names(client, need))
+            if not single:
+                await _fill_targets(client, [x.post_portrait for x in res.objs], pcache)
             items = [{
-                "title": x.title, "text": x.text,
-                "op_user": x.op_user_name,
+                "op_type": x.op_type, "op_user": x.op_user_name,
                 "target": target if single else pcache.get(x.post_portrait, ""),
-                "op_type": x.op_type, "op_time": str(x.op_time),
+                "op_time": str(x.op_time), "ts": _op_ts(x.op_time),
+                "title": x.title, "text": x.text,
             } for x in res.objs]
             if items:
                 yield {"type": "items", "items": items}
             if not res.has_more:
                 break
             pn += 1
+
+        # 2) 用户操作（封禁等）——权限或接口异常时静默跳过，不影响已取到的删贴
+        pn = 1
+        while pn <= max_pages:
+            try:
+                res = await client.get_bawu_userlogs(
+                    fname, pn, search_value=search_value, search_type=BawuSearchType.USER)
+            except Exception:
+                break
+            if getattr(res, "err", None) is not None:
+                break
+            if not single:
+                await _fill_targets(client, [x.user_portrait for x in res.objs], pcache)
+            items = [{
+                "op_type": x.op_type, "op_user": x.op_user_name,
+                "target": target if single else pcache.get(x.user_portrait, ""),
+                "op_time": str(x.op_time), "ts": _op_ts(x.op_time),
+                "duration": getattr(x, "op_duration", 0),
+            } for x in res.objs]
+            if items:
+                yield {"type": "items", "items": items}
+            if not getattr(res, "has_more", False):
+                break
+            pn += 1
+
         yield {"type": "done"}
 
 
@@ -581,6 +619,9 @@ main{max-width:960px;margin:0 auto;padding:24px}
 .rtext{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;margin-top:6px;font-size:14px}
 .ltitle{font-weight:500;margin-top:6px}.ltext{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted);margin-top:4px;font-size:13.5px}
 .optag{background:#3a2a12;color:#ffd7a8;border:1px solid #5a3f1c;border-radius:4px;padding:1px 6px;font-size:11px}
+.optag.ban{background:#3a1418;color:#ffb4b4;border-color:#5a2228}
+.toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)}
+.tlabel{font-size:12px;color:var(--muted)}
 .box{margin-top:24px;padding:16px 18px;border-radius:var(--r);display:flex;align-items:center;gap:12px;font-size:14px}
 .loading{background:var(--surface);border:1px solid var(--border);color:var(--muted)}
 .error{background:#2a1416;border:1px solid #52262a;color:#ffb4b4;white-space:pre-wrap}
@@ -647,12 +688,20 @@ main{max-width:960px;margin:0 auto;padding:24px}
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询记录</button>
     </form>
-    <p class="hint">留空被查询人=看<b>全吧最近处理记录</b>（可按吧务/被处理人分类）；填 id=只看该用户。需 STOKEN（.tieba.baidu.com 域）、账号为该吧吧务。</p>
+    <p class="hint">留空被查询人=看<b>全吧最近处理记录</b>（删贴+封禁，可按操作类型/吧务/被处理人分类）；填 id=只看该用户。需 STOKEN（.tieba.baidu.com 域）、账号为该吧吧务。</p>
   </section>
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><select id="catby" class="barsel" hidden><option value="op_user">按吧务</option><option value="target">按被处理人</option></select><span class="catbox" id="catbox" hidden><input id="catfilter" class="barsel" placeholder="全部吧，可搜" autocomplete="off"><div class="catmenu" id="catmenu" hidden></div></span><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 txt</button><button class="ghost" id="dlhtml">导出网页</button></div>
+      <div class="ract"><button class="ghost" id="copy">复制</button><button class="ghost" id="dl">下载txt</button><button class="ghost" id="dlhtml">导出网页</button></div>
+    </div>
+    <div class="toolbar" id="toolbar" hidden>
+      <span class="tlabel" id="catbyLabel" hidden>分类</span>
+      <select id="catby" class="barsel" hidden><option value="op_type">按操作类型</option><option value="op_user">按吧务</option><option value="target">按被处理人</option></select>
+      <span class="catbox" id="catbox" hidden><input id="catfilter" class="barsel" placeholder="筛选，可搜" autocomplete="off"><div class="catmenu" id="catmenu" hidden></div></span>
+      <span class="tlabel" id="sortLabel" hidden>排序</span>
+      <select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select>
+      <input id="search" class="search" placeholder="搜索文本…">
     </div>
     <div id="rbody"></div>
     <div class="pager" id="pager" hidden>
@@ -708,11 +757,13 @@ $$(".tab").forEach(tab=>tab.onclick=()=>{
 
 // ---- 渲染配置（流式累积；itemHTML/match/head/empty 与数据分离）----
 function setBody(h){$("#rbody").innerHTML=h}
-let view=null, page=1, per=50, query="", catFilter="", sortMode="new", logCatBy="op_user", streamToken=0;
+let view=null, page=1, per=50, query="", catFilter="", sortMode="new", logCatBy="op_type", streamToken=0;
 const cache=new Map();  // 结果缓存：同一查询秒开
-const SORTABLE={user:1, search:1};                    // 可按时间排序的视图
+const SORTABLE={user:1, search:1, logs:1};             // 可按时间排序的视图
 function catField(){const k=view.formKind;return k==="user"?"fname":k==="search"?"user":k==="logs"?logCatBy:null;}
-function catLabelText(){const k=view.formKind;return k==="user"?"全部吧":k==="search"?"全部发帖人":logCatBy==="op_user"?"全部吧务":"全部被处理人";}
+function catLabelText(){const k=view.formKind;
+  if(k==="user")return "全部吧"; if(k==="search")return "全部发帖人";
+  return logCatBy==="op_type"?"全部操作":logCatBy==="op_user"?"全部吧务":"全部被处理人";}
 
 const RENDER={
   user:{
@@ -726,8 +777,14 @@ const RENDER={
   logs:{
     empty:"无吧务处理记录",
     head:m=> m.whole ? `最近处理记录 · 吧 <b>${esc(m.fname)}</b>` : `被处理人 <b>${esc(m.target)}</b> · 吧 ${esc(m.fname)}`,
-    match:x=>x.title+" "+x.text+" "+x.op_user+" "+(x.target||""),
-    itemHTML:x=>`<div class="row"><div class="meta"><span class="optag">${esc(x.op_type)}</span><span>吧务 ${esc(x.op_user)}</span>${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}<span class="spacer"></span><span>${esc(x.op_time)}</span></div><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div></div>`,
+    match:x=>(x.op_type||"")+" "+(x.op_user||"")+" "+(x.target||"")+" "+(x.title||"")+" "+(x.text||""),
+    itemHTML:x=>{
+      const ban=x.duration!==undefined;
+      const meta=`<div class="meta"><span class="optag${ban?" ban":""}">${esc(x.op_type)}</span><span>吧务 ${esc(x.op_user)}</span>${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}${ban&&x.duration?`<span class="tag">${x.duration}天</span>`:""}<span class="spacer"></span><span>${esc(x.op_time)}</span></div>`;
+      return ban
+        ? `<div class="row">${meta}</div>`
+        : `<div class="row">${meta}<div class="ltitle">${esc(x.title||"")}</div><div class="ltext">${esc(x.text||"")}</div></div>`;
+    },
   },
   search:{
     empty:"没有搜到内容",
@@ -776,11 +833,15 @@ function pickCat(v){
 function applyView(){
   if(!view)return;
   const rc=RENDER[view.rc];
+  $("#toolbar").hidden=false;
   updateCatFilter();
   // 排序（仅可排序视图）
   let base=view.items.slice();
   if(SORTABLE[view.formKind]){ base.sort((a,b)=> sortMode==="old" ? a.ts-b.ts : b.ts-a.ts); $("#sortsel").hidden=false; }
   else $("#sortsel").hidden=true;
+  // 工具条标签随控件显隐
+  $("#catbyLabel").hidden = $("#catby").hidden && $("#catbox").hidden;
+  $("#sortLabel").hidden = $("#sortsel").hidden;
   // 分类筛选
   const field=catField();
   if(field && catFilter){const cf=catFilter.toLowerCase(); base=base.filter(it=>catVal(it,field).toLowerCase().includes(cf));}
@@ -798,7 +859,7 @@ function applyView(){
   else pager.hidden=true;
 }
 
-function resetControls(){ query="";catFilter="";sortMode="new";logCatBy="op_user";page=1;$("#search").value="";$("#sortsel").value="new";$("#catby").value="op_user";$("#catfilter").value="";$("#catmenu").hidden=true; }
+function resetControls(){ query="";catFilter="";sortMode="new";logCatBy="op_type";page=1;$("#search").value="";$("#sortsel").value="new";$("#catby").value="op_type";$("#catfilter").value="";$("#catmenu").hidden=true; }
 
 // 逐行读取 NDJSON 流
 async function streamNDJSON(url,body,onChunk){
@@ -893,9 +954,11 @@ function userText(d){
 function logsText(d){
   let L=[`吧务处理记录 · 吧: ${d.fname}`+(d.whole?"（全吧最近）":` · 被处理人: ${d.target}`),""];
   if(!d.logs.length)L.push("（无记录）");
-  d.logs.forEach(x=>L.push(
-    `【${x.op_type}】吧务 ${x.op_user}${x.target?` · 被处理 ${x.target}`:""} · ${x.op_time}`,
-    `   ${x.title}`, `   ${x.text}`, "==============="));
+  d.logs.forEach(x=>{
+    L.push(`【${x.op_type}】吧务 ${x.op_user}${x.target?` · 被处理 ${x.target}`:""}${x.duration!==undefined&&x.duration?` · ${x.duration}天`:""} · ${x.op_time}`);
+    if(x.title!==undefined){ L.push(`   ${x.title}`, `   ${x.text}`); }
+    L.push("===============");
+  });
   L.push("",`共 ${d.logs.length} 条`);return L.join("\n")+"\n";
 }
 function searchText(d){
@@ -947,13 +1010,18 @@ function buildHTML(){
   }else{
     title=m.whole?`${esc(m.fname)} 吧务处理记录`:`${esc(m.target)} 的吧务处理记录`;
     sub=`吧 ${esc(m.fname)}${m.whole?"（全吧最近）":""} · 共 ${items.length} 条`;
-    rows=items.map(x=>`<div class="card"><div class="hd"><span class="optag">${esc(x.op_type)}</span>吧务 ${esc(x.op_user)}${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}<span class="t">${esc(x.op_time)}</span></div><div class="ttl">${esc(x.title)}</div><div class="tx">${esc(x.text)}</div></div>`).join("");
+    rows=items.map(x=>{
+      const ban=x.duration!==undefined;
+      const hd=`<div class="hd"><span class="optag">${esc(x.op_type)}</span>吧务 ${esc(x.op_user)}${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}${ban&&x.duration?`<span class="tag">${x.duration}天</span>`:""}<span class="t">${esc(x.op_time)}</span></div>`;
+      return ban?`<div class="card">${hd}</div>`
+                :`<div class="card">${hd}<div class="ttl">${esc(x.title||"")}</div><div class="tx">${esc(x.text||"")}</div></div>`;
+    }).join("");
   }
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${EXPORT_CSS}</style></head><body><h1>${title}</h1><div class="sub">${sub} · 导出于 ${new Date().toLocaleString()}</div>${rows||'<div class="st">无内容</div>'}</body></html>`;
 }
 
 // 结果区
-function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true;$("#loading").hidden=true}
+function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true;$("#loading").hidden=true;$("#toolbar").hidden=true;$("#catmenu").hidden=true}
 function load(on){$("#loading").hidden=!on}
 function setLoad(n){$("#loading").hidden=false;$("#loadmsg").textContent=n?`加载中… 已 ${n} 条`:"加载中…";}
 function showErr(m){const e=$("#error");e.textContent="出错了："+m;e.hidden=false}
