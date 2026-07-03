@@ -652,7 +652,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
         <option value="op">锁定吧务</option>
         <option value="target">锁定被处理人</option>
       </select></label>
-      <label class="sc-op" hidden>吧务名<input name="op_user" list="bawulist" placeholder="输入/选择吧务"><datalist id="bawulist"></datalist></label>
+      <label class="sc-op" hidden>吧务名<input name="op_user" list="bawulist" placeholder="输入/选择（含已撤职吧务）"><datalist id="bawulist"></datalist></label>
       <label class="sc-target" hidden>被处理人主页 id<input name="tieba_uid" type="number" class="no-spin" placeholder="个人主页链接中的数字"></label>
       <label>抓取页数<input name="max_pages" type="number" value="30" min="1" title="从贴吧最多抓取多少页数据；与下方结果“每页显示”无关"></label>
       <button type="submit">查询记录</button>
@@ -744,6 +744,7 @@ async function enterBar(){
   const f=$("#wsbar").value.trim();
   if(!f){$("#wsinfo").textContent="请输入吧名";return;}
   if(!cred.bduss){$("#wsinfo").textContent="请先在右上角登录";return;}
+  if(f!==currentFname){ seenOps.clear(); cache.clear(); }  // 换吧：清掉上一个吧的候选与缓存
   currentFname=f; localStorage.fname=f;
   $("#wsinfo").textContent="加载中…"; $("#overview").innerHTML='<p class="hint">加载中…</p>';
   switchTab("overview");
@@ -755,11 +756,21 @@ async function enterBar(){
     $("#overview").innerHTML=`<p class="hint" style="color:var(--err)">出错了：${esc(e.message)}</p>`;
   }
 }
+// 「锁定吧务」候选 = 当前吧务 ∪ 记录里出现过的操作者（含已撤的吧务）
+let bawuNames=[], seenOps=new Set();
+function refreshBawuList(){
+  const all=[...new Set([...bawuNames,...seenOps])].filter(Boolean).sort((a,b)=>a.localeCompare(b,"zh"));
+  $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}">`).join("");
+}
+function harvestOps(){   // 从当前处理记录结果里收集操作者名，补进候选（撤职吧务靠这个能被选到）
+  if(!view||view.formKind!=="logs")return;
+  view.items.forEach(x=>{ if(x.op_user)seenOps.add(x.op_user); });
+  refreshBawuList();
+}
 function renderOverview(d){
   const f=d.forum, n=x=>Number(x||0).toLocaleString();
-  // 吧务名填进「锁定吧务」的可搜下拉（用 user_name 检索，显示名做备注）
-  const unames=[...new Set(d.bawu.flatMap(r=>r.users.map(u=>u.user_name||u.name)))].filter(Boolean);
-  $("#bawulist").innerHTML=unames.map(u=>`<option value="${esc(u)}">`).join("");
+  bawuNames=[...new Set(d.bawu.flatMap(r=>r.users.map(u=>u.user_name||u.name)))].filter(Boolean);
+  refreshBawuList();
   const roles=d.bawu.map(r=>`<div class="brole"><div class="rt">${esc(r.role)}（${r.users.length}）</div><div class="bwrap">`+
     r.users.map(u=>`<span class="bchip" data-uname="${esc(u.user_name||u.name)}">${esc(u.name)}${u.level?`<span class="lv">Lv${u.level}</span>`:""}</span>`).join("")+`</div></div>`).join("");
   $("#overview").innerHTML=
@@ -888,9 +899,16 @@ function applyView(){
 }
 
 function resetControls(){ query="";catFilter="";sortMode="new";logCatBy="op_type";page=1;$("#search").value="";$("#sortsel").value="new";$("#catby").value="op_type";$("#catfilter").value="";$("#catmenu").hidden=true; }
-// 锁定后，结果区默认的细分维度：锁吧务→按操作类型；锁被处理人→按吧务；全吧→按操作类型
+// 锁定后调整“分类维度”下拉：去掉无意义的维度，并设合理默认
+//   锁吧务(op)   → 可按 操作类型/被处理人（不含“按吧务”，只有一个人）
+//   锁被处理人   → 可按 操作类型/吧务（不含“按被处理人”）
+//   全吧         → 三者都有
 function defaultCatBy(meta){
   if(!meta||view.formKind!=="logs")return;
+  const opts=[["op_type","按操作类型"]];
+  if(meta.mode!=="op") opts.push(["op_user","按吧务"]);
+  if(meta.mode!=="target") opts.push(["target","按被处理人"]);
+  $("#catby").innerHTML=opts.map(([v,l])=>`<option value="${v}">${l}</option>`).join("");
   logCatBy = meta.mode==="target" ? "op_user" : "op_type";
   $("#catby").value=logCatBy;
 }
@@ -918,7 +936,7 @@ async function submit(formKind, body){
   if(cache.has(key)){
     const snap=cache.get(key);
     view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
-    resetControls(); defaultCatBy(snap.meta); $("#results").hidden=false; load(false); applyView();
+    resetControls(); defaultCatBy(snap.meta); $("#results").hidden=false; load(false); applyView(); harvestOps();
     return;
   }
   view={rc:f.rc, formKind, meta:null, items:[], done:false};
@@ -934,7 +952,7 @@ async function submit(formKind, body){
     });
   }catch(e){ if(token===streamToken) errMsg=e.message; }
   if(token!==streamToken)return;   // 已被新查询取代
-  load(false); view.done=true; applyView();
+  load(false); view.done=true; applyView(); harvestOps();
   if(errMsg){ showErr(errMsg); if(!view.items.length)$("#results").hidden=true; }
   else cache.set(key,{meta:view.meta, items:view.items.slice()});
 }
