@@ -654,7 +654,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
       </select></label>
       <label class="sc-op" hidden>吧务名<input name="op_user" list="bawulist" placeholder="输入/选择（含已撤职吧务）"><datalist id="bawulist"></datalist></label>
       <label class="sc-target" hidden>被处理人主页 id<input name="tieba_uid" type="number" class="no-spin" placeholder="个人主页链接中的数字"></label>
-      <label>抓取页数<input name="max_pages" type="number" value="30" min="1" title="从贴吧最多抓取多少页数据；与下方结果“每页显示”无关"></label>
+      <label>抓取页数<input name="max_pages" type="number" value="10" min="1" title="从贴吧最多抓取多少页数据；越大越慢。与下方结果“每页显示”无关"></label>
       <button type="submit">查询记录</button>
     </form>
     <p class="hint">当前吧的<b>删贴+封禁</b>记录。锁定后可在结果区按操作类型/吧务/被处理人再细分。也可在「概览」点吧务名直接锁定。</p>
@@ -744,30 +744,51 @@ async function enterBar(){
   const f=$("#wsbar").value.trim();
   if(!f){$("#wsinfo").textContent="请输入吧名";return;}
   if(!cred.bduss){$("#wsinfo").textContent="请先在右上角登录";return;}
-  if(f!==currentFname){ seenOps.clear(); cache.clear(); }  // 换吧：清掉上一个吧的候选与缓存
+  if(f!==currentFname){ seenOps.clear(); cache.clear(); lastOverview=null; }  // 换吧：清运行时候选与缓存
   currentFname=f; localStorage.fname=f;
-  $("#wsinfo").textContent="加载中…"; $("#overview").innerHTML='<p class="hint">加载中…</p>';
   switchTab("overview");
+  // 先用本地缓存秒出，再联网刷新
+  const cached=loadForumData(f);
+  if(cached){
+    seenOps=new Set(cached.ops||[]);
+    if(cached.ov) renderOverview(cached.ov);
+    $("#wsinfo").textContent="缓存 · 刷新中…";
+  }else{
+    $("#wsinfo").textContent="加载中…"; $("#overview").innerHTML='<p class="hint">加载中…</p>';
+  }
   try{
     renderOverview(await api("/api/overview",{fname:f}));
+    saveForumData();
     $("#wsinfo").textContent="✓ "+f;
   }catch(e){
-    $("#wsinfo").textContent="";
-    $("#overview").innerHTML=`<p class="hint" style="color:var(--err)">出错了：${esc(e.message)}</p>`;
+    if(!cached){ $("#wsinfo").textContent=""; $("#overview").innerHTML=`<p class="hint" style="color:var(--err)">出错了：${esc(e.message)}</p>`; }
+    else $("#wsinfo").textContent="✓ "+f+"（用缓存，刷新失败）";
   }
 }
 // 「锁定吧务」候选 = 当前吧务 ∪ 记录里出现过的操作者（含已撤的吧务）
-let bawuNames=[], seenOps=new Set();
+let bawuNames=[], seenOps=new Set(), lastOverview=null;
 function refreshBawuList(){
   const all=[...new Set([...bawuNames,...seenOps])].filter(Boolean).sort((a,b)=>a.localeCompare(b,"zh"));
   $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}">`).join("");
 }
-function harvestOps(){   // 从当前处理记录结果里收集操作者名，补进候选（撤职吧务靠这个能被选到）
+// 按吧持久化：概览数据 + 累计操作者（含撤职吧务），存 localStorage，下次秒出
+function fdKey(fn){ return "fd:"+(fn||currentFname); }
+function saveForumData(){
+  if(!currentFname)return;
+  try{ localStorage.setItem(fdKey(), JSON.stringify({ov:lastOverview, ops:[...seenOps], ts:Date.now()})); }catch(e){}
+}
+function loadForumData(fn){
+  try{ return JSON.parse(localStorage.getItem(fdKey(fn))||"null"); }catch(e){ return null; }
+}
+function harvestOps(){   // 从当前处理记录结果里收集操作者名，补进候选并持久化（撤职吧务靠这个留存）
   if(!view||view.formKind!=="logs")return;
+  const before=seenOps.size;
   view.items.forEach(x=>{ if(x.op_user)seenOps.add(x.op_user); });
   refreshBawuList();
+  if(seenOps.size!==before) saveForumData();
 }
 function renderOverview(d){
+  lastOverview=d;
   const f=d.forum, n=x=>Number(x||0).toLocaleString();
   bawuNames=[...new Set(d.bawu.flatMap(r=>r.users.map(u=>u.user_name||u.name)))].filter(Boolean);
   refreshBawuList();
@@ -947,7 +968,7 @@ async function submit(formKind, body){
     await streamNDJSON(f.url, body, chunk=>{
       if(token!==streamToken)return;
       if(chunk.type==="head"){ view.meta=chunk.head; defaultCatBy(chunk.head); }
-      else if(chunk.type==="items"){ view.items.push(...chunk.items); applyView(); setLoad(view.items.length); }
+      else if(chunk.type==="items"){ view.items.push(...chunk.items); applyView(); harvestOps(); setLoad(view.items.length); }
       else if(chunk.type==="error") errMsg=chunk.error;
     });
   }catch(e){ if(token===streamToken) errMsg=e.message; }
@@ -1082,6 +1103,12 @@ async function init(){
   $("#bduss").value=cred.bduss;
   $("#stoken").value=cred.stoken;
   $("#wsbar").value=currentFname;   // 记住上次管理的吧
+  // 预载上次吧的缓存：概览秒出、锁定吧务候选（含撤职）立即可用
+  if(currentFname){
+    const cached=loadForumData(currentFname);
+    if(cached){ seenOps=new Set(cached.ops||[]); if(cached.ov) renderOverview(cached.ov);
+      $("#wsinfo").textContent="缓存 "+currentFname+"（点「进入」刷新）"; refreshBawuList(); }
+  }
   if(cred.bduss) login();
 }
 init();
