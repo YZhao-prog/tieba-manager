@@ -654,7 +654,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
       </select></label>
       <label class="sc-op" hidden>吧务名<input name="op_user" list="bawulist" placeholder="输入/选择吧务"><datalist id="bawulist"></datalist></label>
       <label class="sc-target" hidden>被处理人主页 id<input name="tieba_uid" type="number" class="no-spin" placeholder="个人主页链接中的数字"></label>
-      <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
+      <label>抓取页数<input name="max_pages" type="number" value="30" min="1" title="从贴吧最多抓取多少页数据；与下方结果“每页显示”无关"></label>
       <button type="submit">查询记录</button>
     </form>
     <p class="hint">当前吧的<b>删贴+封禁</b>记录。锁定后可在结果区按操作类型/吧务/被处理人再细分。也可在「概览」点吧务名直接锁定。</p>
@@ -663,7 +663,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
     <form class="form" data-form="user">
       <label>用户贴吧主页 id<input name="tieba_uid" type="number" class="no-spin" required placeholder="个人主页链接中的数字"></label>
       <label>内容<select name="kind"><option value="all">全部</option><option value="posts">回复</option><option value="threads">主题帖</option></select></label>
-      <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
+      <label>抓取页数<input name="max_pages" type="number" value="30" min="1" title="从贴吧最多抓取多少页数据；与下方结果“每页显示”无关"></label>
       <button type="submit">查询</button>
     </form>
     <p class="hint">查某用户<b>跨吧</b>的发言（回复+主题帖），不限于当前管理的吧；结果可按贴吧分类。</p>
@@ -957,7 +957,7 @@ $$(".form").forEach(form=>form.onsubmit=async e=>{
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
 // 分类可搜索下拉
 $("#catfilter").oninput=e=>{catFilter=e.target.value.trim();page=1;applyView();renderCatMenu(e.target.value)};
-$("#catfilter").onfocus=e=>renderCatMenu(e.target.value);
+$("#catfilter").onfocus=e=>{e.target.select();renderCatMenu("");};  // 点开显示全部选项，便于换选
 $("#catby").onchange=e=>{logCatBy=e.target.value;catFilter="";$("#catfilter").value="";page=1;applyView()};
 $("#catmenu").onclick=e=>{const o=e.target.closest(".opt"); if(o)pickCat(o.dataset.v)};
 document.addEventListener("click",e=>{ if(!e.target.closest("#catbox")) $("#catmenu").hidden=true; });
