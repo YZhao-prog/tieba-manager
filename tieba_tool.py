@@ -140,6 +140,43 @@ async def svc_me(bduss="", stoken="", **_):
         return {"user_id": me.user_id, "show_name": _name(me), "user_name": me.user_name}
 
 
+# 吧务角色 -> 中文标签（按重要性排序）
+BAWU_ROLES = [
+    ("admin", "大吧主"), ("manager", "小吧主"),
+    ("profess_admin", "专业吧主"), ("fourth_admin", "第四吧主"),
+    ("voice_editor", "语音小编"), ("image_editor", "图片小编"),
+    ("video_editor", "视频小编"), ("broadcast_editor", "广播小编"),
+    ("journal_chief_editor", "期刊主编"), ("journal_editor", "期刊编辑"),
+]
+
+
+async def svc_overview(bduss="", stoken="", fname=None, **_):
+    """进入某个吧的管理台：吧信息 + 吧务列表。"""
+    if not fname:
+        raise ServiceError("请填写要管理的贴吧名。")
+    async with _client(bduss, stoken) as client:
+        forum = _check(await client.get_forum(fname), "获取吧信息")
+        bawu = await client.get_bawu_info(fname)
+        if getattr(bawu, "err", None) is not None:
+            raise ServiceError(f"获取吧务列表失败：{bawu.err}（确认吧名正确、账号已登录）")
+        roles = []
+        for attr, label in BAWU_ROLES:
+            users = getattr(bawu, attr, []) or []
+            if users:
+                roles.append({"role": label, "users": [
+                    {"name": _name(u), "user_id": u.user_id, "level": getattr(u, "level", 0)}
+                    for u in users]})
+        return {
+            "forum": {
+                "fname": forum.fname, "slogan": forum.slogan,
+                "member_num": forum.member_num, "post_num": forum.post_num,
+                "thread_num": forum.thread_num,
+            },
+            "bawu": roles,
+            "bawu_total": len(getattr(bawu, "all", []) or []),
+        }
+
+
 # --- 流式接口（NDJSON）：逐页 yield，前端边收边渲染 ---
 # 每个 chunk 形如 {"type": "head"|"items"|"done", ...}
 
@@ -436,6 +473,7 @@ DEFAULTS = load_defaults()
 ROUTES = {
     "/api/me": svc_me,
     "/api/locate": svc_locate,
+    "/api/overview": svc_overview,
 }
 
 # 流式接口：NDJSON，逐页 yield chunk
@@ -581,6 +619,22 @@ padding:14px 24px;border-bottom:1px solid var(--border);background:var(--surface
 .status{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--muted)}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--muted)}
 .dot.ok{background:var(--ok)}.dot.err{background:var(--err)}.dot.warn{background:var(--warn)}
+.ws{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 24px;border-bottom:1px solid var(--border);background:var(--surface2)}
+.wslabel{font-size:13px;color:var(--muted)}
+.ws input{flex:1 1 260px;max-width:360px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:14px}
+.ws input:focus{outline:none;border-color:var(--accent)}
+.ws button{background:var(--accent);color:#fff;border:none;padding:8px 18px;border-radius:8px;font-size:14px;cursor:pointer}
+.overview{padding:8px 4px}
+.fcard{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:18px 20px;margin-bottom:16px}
+.fcard h2{margin:0 0 6px;font-size:18px}
+.fstat{display:flex;gap:20px;flex-wrap:wrap;color:var(--muted);font-size:13px;margin-top:8px}
+.fstat b{color:var(--text)}
+.brole{margin-bottom:14px}
+.brole .rt{font-size:13px;color:var(--muted);margin-bottom:6px}
+.bwrap{display:flex;flex-wrap:wrap;gap:8px}
+.bchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:13px;cursor:pointer}
+.bchip:hover{border-color:var(--accent);color:var(--accent)}
+.bchip .lv{font-size:11px;color:var(--muted)}
 .tabs{display:flex;gap:4px;padding:12px 24px 0;border-bottom:1px solid var(--border);background:var(--surface)}
 .tab{background:none;border:none;color:var(--muted);padding:10px 16px;font-size:14px;cursor:pointer;border-bottom:2px solid transparent;border-radius:6px 6px 0 0}
 .tab:hover{color:var(--text);background:var(--surface2)}
@@ -656,39 +710,47 @@ main{max-width:960px;margin:0 auto;padding:24px}
     <span class="status"><span class="dot" id="dot"></span><span id="stext">未登录</span></span>
   </div>
 </header>
+<div class="ws">
+  <span class="wslabel">管理贴吧</span>
+  <input id="wsbar" placeholder="输入吧名后回车/进入，如 lol、yy小说吧" autocomplete="off">
+  <button id="wsgo">进入</button>
+  <span id="wsinfo" class="muted"></span>
+</div>
 <nav class="tabs">
-  <button class="tab active" data-tab="user">用户发言查询</button>
+  <button class="tab active" data-tab="overview">概览</button>
+  <button class="tab" data-tab="logs">处理记录</button>
   <button class="tab" data-tab="search">关键字搜索</button>
-  <button class="tab" data-tab="logs">吧务处理记录</button>
+  <button class="tab" data-tab="user">用户发言</button>
 </nav>
 <main>
-  <section class="panel active" id="p-user">
+  <section class="panel active" id="p-overview">
+    <div id="overview" class="overview"><p class="hint">在上方输入你管理的贴吧名并「进入」，这里会显示吧信息和吧务列表。</p></div>
+  </section>
+  <section class="panel" id="p-logs">
+    <form class="form" data-form="logs">
+      <label>被查询人主页 id（可留空）<input name="tieba_uid" type="number" class="no-spin" placeholder="留空=全吧最近记录"></label>
+      <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
+      <button type="submit">查询记录</button>
+    </form>
+    <p class="hint">当前吧的<b>删贴+封禁</b>记录。留空=全吧最近（可按操作类型/吧务/被处理人分类）；填 id=只看该用户。</p>
+  </section>
+  <section class="panel" id="p-search">
+    <form class="form" data-form="search">
+      <label>关键字<input name="query" type="text" required placeholder="要搜索的词"></label>
+      <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
+      <label class="chk"><input name="only_thread" type="checkbox"> 只看主题帖</label>
+      <button type="submit">搜索</button>
+    </form>
+    <p class="hint">在当前吧内按内容搜索帖子/回复，能查到隐藏用户的公开发言。</p>
+  </section>
+  <section class="panel" id="p-user">
     <form class="form" data-form="user">
       <label>用户贴吧主页 id<input name="tieba_uid" type="number" class="no-spin" required placeholder="个人主页链接中的数字"></label>
       <label>内容<select name="kind"><option value="all">全部</option><option value="posts">回复</option><option value="threads">主题帖</option></select></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询</button>
     </form>
-    <p class="hint">默认查“全部”（回复+主题帖，按时间合并），吧名分类会把主题帖一起算进来。也可单选“回复”或“主题帖”。</p>
-  </section>
-  <section class="panel" id="p-search">
-    <form class="form" data-form="search">
-      <label>贴吧名<input name="fname" type="text" required placeholder="如 lol、yy小说吧"></label>
-      <label>关键字<input name="query" type="text" required placeholder="要搜索的词"></label>
-      <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
-      <label class="chk"><input name="only_thread" type="checkbox"> 只看主题帖</label>
-      <button type="submit">搜索</button>
-    </form>
-    <p class="hint">在指定吧内按内容搜索帖子/回复。能查到隐藏用户在该吧的公开发言。</p>
-  </section>
-  <section class="panel" id="p-logs">
-    <form class="form" data-form="logs">
-      <label>贴吧名<input name="fname" type="text" required placeholder="如 lol、yy小说吧"></label>
-      <label>被查询人主页 id（可留空）<input name="tieba_uid" type="number" class="no-spin" placeholder="留空=查全吧最近记录"></label>
-      <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
-      <button type="submit">查询记录</button>
-    </form>
-    <p class="hint">留空被查询人=看<b>全吧最近处理记录</b>（删贴+封禁，可按操作类型/吧务/被处理人分类）；填 id=只看该用户。需 STOKEN（.tieba.baidu.com 域）、账号为该吧吧务。</p>
+    <p class="hint">查某用户跨吧的发言（回复+主题帖），不限于当前管理的吧。</p>
   </section>
   <section class="results" id="results" hidden>
     <div class="rhead">
@@ -747,13 +809,57 @@ async function api(url,body){
   return p.data;
 }
 
-// tab
-$$(".tab").forEach(tab=>tab.onclick=()=>{
-  $$(".tab").forEach(t=>t.classList.remove("active"));
+// ---- 工作台：先选定要管理的吧 ----
+let currentFname=localStorage.fname||"";
+let pendingLogFilter=null;
+function switchTab(name){
+  $$(".tab").forEach(t=>t.classList.toggle("active", t.dataset.tab===name));
   $$(".panel").forEach(p=>p.classList.remove("active"));
-  tab.classList.add("active");$("#p-"+tab.dataset.tab).classList.add("active");
-  streamToken++;view=null;catFilter="";sortMode="new";hideRes();   // 使进行中的流失效
+  $("#p-"+name).classList.add("active");
+  streamToken++;view=null;catFilter="";sortMode="new";hideRes();
+}
+$$(".tab").forEach(tab=>tab.onclick=()=>switchTab(tab.dataset.tab));
+
+async function enterBar(){
+  const f=$("#wsbar").value.trim();
+  if(!f){$("#wsinfo").textContent="请输入吧名";return;}
+  if(!cred.bduss){$("#wsinfo").textContent="请先在右上角登录";return;}
+  currentFname=f; localStorage.fname=f;
+  $("#wsinfo").textContent="加载中…"; $("#overview").innerHTML='<p class="hint">加载中…</p>';
+  switchTab("overview");
+  try{
+    renderOverview(await api("/api/overview",{fname:f}));
+    $("#wsinfo").textContent="✓ "+f;
+  }catch(e){
+    $("#wsinfo").textContent="";
+    $("#overview").innerHTML=`<p class="hint" style="color:var(--err)">出错了：${esc(e.message)}</p>`;
+  }
+}
+function renderOverview(d){
+  const f=d.forum, n=x=>Number(x||0).toLocaleString();
+  const roles=d.bawu.map(r=>`<div class="brole"><div class="rt">${esc(r.role)}（${r.users.length}）</div><div class="bwrap">`+
+    r.users.map(u=>`<span class="bchip" data-name="${esc(u.name)}">${esc(u.name)}${u.level?`<span class="lv">Lv${u.level}</span>`:""}</span>`).join("")+`</div></div>`).join("");
+  $("#overview").innerHTML=
+    `<div class="fcard"><h2>${esc(f.fname)}</h2><div class="muted">${esc(f.slogan||"")}</div>`+
+    `<div class="fstat"><span>关注 <b>${n(f.member_num)}</b></span><span>主题帖 <b>${n(f.thread_num)}</b></span><span>回复 <b>${n(f.post_num)}</b></span><span>吧务 <b>${d.bawu_total}</b></span></div></div>`+
+    `<div class="fcard"><h2 style="font-size:15px;margin-bottom:12px">吧务列表 · 点击查看 TA 的处理记录</h2>${roles||'<p class="hint">无</p>'}</div>`;
+}
+$("#wsgo").onclick=enterBar;
+$("#wsbar").onkeydown=e=>{ if(e.key==="Enter")enterBar(); };
+$("#overview").addEventListener("click",e=>{
+  const c=e.target.closest(".bchip"); if(!c)return;
+  pendingLogFilter={by:"op_user", val:c.dataset.name};
+  switchTab("logs");
+  const form=$("#p-logs form");
+  form.requestSubmit?form.requestSubmit():form.dispatchEvent(new Event("submit",{cancelable:true}));
 });
+function applyPending(){
+  if(pendingLogFilter && view && view.formKind==="logs"){
+    logCatBy=pendingLogFilter.by; catFilter=pendingLogFilter.val;
+    $("#catby").value=logCatBy; $("#catfilter").value=catFilter;
+  }
+  pendingLogFilter=null;
+}
 
 // ---- 渲染配置（流式累积；itemHTML/match/head/empty 与数据分离）----
 function setBody(h){$("#rbody").innerHTML=h}
@@ -884,7 +990,7 @@ async function submit(formKind, body){
   if(cache.has(key)){
     const snap=cache.get(key);
     view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
-    resetControls(); $("#results").hidden=false; load(false); applyView();
+    resetControls(); applyPending(); $("#results").hidden=false; load(false); applyView();
     return;
   }
   view={rc:f.rc, formKind, meta:null, items:[], done:false};
@@ -900,7 +1006,7 @@ async function submit(formKind, body){
     });
   }catch(e){ if(token===streamToken) errMsg=e.message; }
   if(token!==streamToken)return;   // 已被新查询取代
-  load(false); view.done=true; applyView();
+  load(false); view.done=true; applyPending(); applyView();
   if(errMsg){ showErr(errMsg); if(!view.items.length)$("#results").hidden=true; }
   else cache.set(key,{meta:view.meta, items:view.items.slice()});
 }
@@ -908,10 +1014,14 @@ async function submit(formKind, body){
 $$(".form").forEach(form=>form.onsubmit=async e=>{
   e.preventDefault();
   if(!cred.bduss){showErr("请先在右上角填写 BDUSS 并登录");return;}
-  const body={};
+  const kind=form.dataset.form, body={};
   new FormData(form).forEach((v,k)=>body[k]=form.elements[k].type==="number"?Number(v):v);
+  if(kind==="logs"||kind==="search"){
+    if(!currentFname){showErr("请先在上方输入并「进入」一个贴吧");return;}
+    body.fname=currentFname;
+  }
   const btn=$("button[type=submit]",form); btn.disabled=true;
-  try{ await submit(form.dataset.form, body); } finally{ btn.disabled=false; }
+  try{ await submit(kind, body); } finally{ btn.disabled=false; }
 });
 
 // 「查楼层」按需定位（事件委托，#rbody 常驻）
@@ -1052,6 +1162,7 @@ async function init(){
   localStorage.bduss=cred.bduss; localStorage.stoken=cred.stoken;   // 同步，清掉旧值
   $("#bduss").value=cred.bduss;
   $("#stoken").value=cred.stoken;
+  $("#wsbar").value=currentFname;   // 记住上次管理的吧
   if(cred.bduss) login();
 }
 init();
