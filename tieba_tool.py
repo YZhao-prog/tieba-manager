@@ -787,8 +787,9 @@ async function enterBar(){
 // 「锁定吧务」候选 = secret.BAWU（你固定的名单，含已撤职）∪ 当前吧务 ∪ 记录里出现过的操作者
 let bawuNames=[], seenOps=new Set(), pinnedBawu=[], lastOverview=null;
 function refreshBawuList(){
+  const cur=new Set(bawuNames);   // 当前在册吧务
   const all=[...new Set([...pinnedBawu,...bawuNames,...seenOps])].filter(Boolean).sort((a,b)=>a.localeCompare(b,"zh"));
-  $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}">`).join("");
+  $("#bawulist").innerHTML=all.map(u=>`<option value="${esc(u)}" label="${cur.has(u)?'在册吧务':'历史/撤职'}">`).join("");
 }
 // 按吧持久化：概览数据 + 累计操作者（含撤职吧务），存 localStorage，下次秒出
 function fdKey(fn){ return "fd:"+(fn||currentFname); }
