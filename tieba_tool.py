@@ -678,7 +678,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><span class="catbox" id="catbox" hidden><input id="catfilter" class="barsel" placeholder="全部吧，可搜" autocomplete="off"><div class="catmenu" id="catmenu" hidden></div></span><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
+      <div class="ract"><span class="catbox" id="catbox" hidden><input id="catfilter" class="barsel" placeholder="全部吧，可搜" autocomplete="off"><div class="catmenu" id="catmenu" hidden></div></span><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 txt</button><button class="ghost" id="dlhtml">导出网页</button></div>
     </div>
     <div id="rbody"></div>
     <div class="pager" id="pager" hidden>
@@ -955,6 +955,46 @@ function currentText(){
   return ({thread:threadText,user:userText,search:searchText,logs:logsText})[k](d);
 }
 
+// 导出为独立网页（自包含，可直接发给别人用浏览器打开）
+const EXPORT_CSS=`body{font:14px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:820px;margin:0 auto;padding:24px;color:#1a1a1a;background:#fff}
+h1{font-size:20px;margin:0 0 4px}.sub{color:#888;font-size:13px;margin-bottom:18px;border-bottom:1px solid #eee;padding-bottom:12px}
+.card{border-bottom:1px solid #eee;padding:12px 0}.hd{margin-bottom:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.no{color:#2563eb;font-weight:600}.t{color:#999;font-size:12px}.tx{white-space:pre-wrap;overflow-wrap:anywhere}
+.cm{margin:6px 0 0 16px;padding-left:12px;border-left:2px solid #eee;color:#444;font-size:13.5px}
+.chip{background:#f1f1f1;border-radius:4px;padding:1px 7px;font-size:12px}
+.tag{background:#dbeafe;color:#1d4ed8;border-radius:4px;padding:1px 6px;font-size:11px}
+.tag2{background:#dcfce7;color:#15803d;border-radius:4px;padding:1px 6px;font-size:11px}
+.optag{background:#fef3c7;color:#b45309;border-radius:4px;padding:1px 6px;font-size:11px}
+.ttl{font-weight:600;margin:2px 0}.st{color:#999;font-size:12px}a{color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}`;
+function buildHTML(){
+  if(!view||!view.meta)return "";
+  const k=view.formKind, m=view.meta, items=view.items;
+  const A=(u,t)=>`<a href="${esc(u)}" target="_blank" rel="noopener">${t}</a>`;
+  let title="结果", sub="", rows="";
+  if(k==="thread"){
+    title=`${esc(m.fname)} — ${esc(m.title)}`;
+    sub=`楼主 ${esc(m.author)} · 回复 ${m.reply_num} · 已取 ${items.length} 楼`;
+    rows=items.map(f=>`<div class="card"><div class="hd"><span class="no">#${f.floor}</span><b>${esc(f.user)}</b><span class="t">${esc(f.time)}</span></div><div class="tx">${esc(f.text)}</div>`+
+      f.comments.map(c=>`<div class="cm"><b>${esc(c.user)}</b> ${esc(c.text)}</div>`).join("")+
+      (f.more_comments>0?`<div class="cm st">… 还有 ${f.more_comments} 条楼中楼未展开</div>`:"")+`</div>`).join("");
+  }else if(k==="user"){
+    title=`${esc(m.show_name)} 的发言`;
+    sub=`主页id ${m.tieba_uid} · 共 ${items.length} 条`;
+    rows=items.map(r=> r.kind==="thread"
+      ? `<div class="card"><div class="hd"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="t">${esc(r.time)}</span>${A(r.link,"帖子↗")}</div><div class="ttl">${esc(r.title)}</div><div class="st">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
+      : `<div class="card"><div class="hd"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="t">${esc(r.time)}</span>${A(r.link,"原帖↗")}</div><div class="tx">${esc(r.text)}</div></div>`).join("");
+  }else if(k==="search"){
+    title=`「${esc(m.query)}」· ${esc(m.fname)}`;
+    sub=`关键字搜索 · 共 ${items.length} 条`;
+    rows=items.map(x=>`<div class="card"><div class="hd"><span class="chip">${esc(x.fname)}</span>${x.is_comment?'<span class="tag">楼中楼</span>':""}${x.user?`<b>${esc(x.user)}</b>`:""}<span class="t">${esc(x.time)}</span>${A(x.link,"原帖↗")}</div>${x.title?`<div class="ttl">${esc(x.title)}</div>`:""}<div class="tx">${esc(x.text)}</div></div>`).join("");
+  }else{
+    title=`${esc(m.target)} 的吧务处理记录`;
+    sub=`吧 ${esc(m.fname)} · 共 ${items.length} 条`;
+    rows=items.map(x=>`<div class="card"><div class="hd"><span class="optag">${esc(x.op_type)}</span>操作人 ${esc(x.op_user)}<span class="t">${esc(x.op_time)}</span></div><div class="ttl">${esc(x.title)}</div><div class="tx">${esc(x.text)}</div></div>`).join("");
+  }
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${EXPORT_CSS}</style></head><body><h1>${title}</h1><div class="sub">${sub} · 导出于 ${new Date().toLocaleString()}</div>${rows||'<div class="st">无内容</div>'}</body></html>`;
+}
+
 // 结果区
 function hideRes(){$("#results").hidden=true;$("#error").hidden=true;$("#pager").hidden=true;$("#loading").hidden=true}
 function load(on){$("#loading").hidden=!on}
@@ -971,12 +1011,13 @@ $("#copy").onclick=async()=>{
   }
   setTimeout(()=>b.textContent=o,1200);
 };
-$("#dl").onclick=()=>{
-  if(!view)return;
+function saveBlob(text,type,name){
   const a=document.createElement("a");
-  a.href=URL.createObjectURL(new Blob([currentText()],{type:"text/plain;charset=utf-8"}));
-  a.download=FLOW[view.formKind].name; a.click(); URL.revokeObjectURL(a.href);
-};
+  a.href=URL.createObjectURL(new Blob([text],{type}));
+  a.download=name; a.click(); URL.revokeObjectURL(a.href);
+}
+$("#dl").onclick=()=>{ if(view) saveBlob(currentText(),"text/plain;charset=utf-8",FLOW[view.formKind].name); };
+$("#dlhtml").onclick=()=>{ if(view) saveBlob(buildHTML(),"text/html;charset=utf-8",FLOW[view.formKind].name.replace(".txt",".html")); };
 
 async function init(){
   let def={bduss:"",stoken:""};       // 服务端默认（secret.py / 环境变量）
