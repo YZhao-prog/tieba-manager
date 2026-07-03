@@ -782,24 +782,28 @@ const FLOW={
 function catVal(it,field){ return it[field]||"(空)"; }
 let catOptions=[], catTotal=0;   // 当前分类选项 [{name,count}]
 function updateCatFilter(){
-  // 分类可搜索下拉：用户发言→按吧名，关键字搜索→按发帖人
+  // 分类可搜索下拉：用户发言→按吧名（含回复/主题帖分计），关键字搜索→按发帖人
   const box=$("#catbox"), field=CATFIELD[view.formKind];
   const names=field?[...new Set(view.items.map(it=>catVal(it,field)))]:[];
   if(!field||names.length<2){ box.hidden=true; $("#catmenu").hidden=true; catOptions=[]; return; }
-  const counts={}; view.items.forEach(it=>counts[catVal(it,field)]=(counts[catVal(it,field)]||0)+1);
-  names.sort((a,b)=>counts[b]-counts[a]);
-  catOptions=names.map(n=>({name:n,count:counts[n]}));
+  const agg={};
+  view.items.forEach(it=>{ const k=catVal(it,field); const a=agg[k]||(agg[k]={count:0,reply:0,thread:0});
+    a.count++; if(it.kind==="thread")a.thread++; else a.reply++; });
+  catOptions=Object.keys(agg).sort((a,b)=>agg[b].count-agg[a].count).map(n=>({name:n,...agg[n]}));
   catTotal=view.items.length;
   $("#catfilter").placeholder=`${CATLABEL[view.formKind]}（${catTotal}），可搜`;
   box.hidden=false;
   if(!$("#catmenu").hidden) renderCatMenu($("#catfilter").value);  // 菜单开着就刷新
+}
+function catCnt(o){
+  return view.formKind==="user" ? `${o.reply}回·${o.thread}帖` : `${o.count}`;
 }
 function renderCatMenu(text){
   const t=(text||"").trim().toLowerCase();
   const opts=catOptions.filter(o=>o.name.toLowerCase().includes(t));
   const menu=$("#catmenu");
   menu.innerHTML=`<div class="opt${catFilter?"":" sel"}" data-v="">全部（${catTotal}）</div>`+
-    opts.map(o=>`<div class="opt${o.name===catFilter?" sel":""}" data-v="${esc(o.name)}"><span>${esc(o.name)}</span><span class="cnt">${o.count}</span></div>`).join("");
+    opts.map(o=>`<div class="opt${o.name===catFilter?" sel":""}" data-v="${esc(o.name)}"><span>${esc(o.name)}</span><span class="cnt">${catCnt(o)}</span></div>`).join("");
   menu.hidden=false;
 }
 function pickCat(v){
