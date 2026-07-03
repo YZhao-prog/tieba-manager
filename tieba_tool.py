@@ -647,11 +647,17 @@ main{max-width:960px;margin:0 auto;padding:24px}
   </section>
   <section class="panel" id="p-logs">
     <form class="form" data-form="logs">
-      <label>被查询人主页 id（可留空）<input name="tieba_uid" type="number" class="no-spin" placeholder="留空=全吧最近记录"></label>
+      <label>查询方式<select name="scope" id="logscope">
+        <option value="whole">全吧最近</option>
+        <option value="op">锁定吧务</option>
+        <option value="target">锁定被处理人</option>
+      </select></label>
+      <label class="sc-op" hidden>吧务名<input name="op_user" list="bawulist" placeholder="输入/选择吧务"><datalist id="bawulist"></datalist></label>
+      <label class="sc-target" hidden>被处理人主页 id<input name="tieba_uid" type="number" class="no-spin" placeholder="个人主页链接中的数字"></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询记录</button>
     </form>
-    <p class="hint">当前吧的<b>删贴+封禁</b>记录。留空=全吧最近（可按操作类型/吧务/被处理人分类）；填 id=只看该用户。</p>
+    <p class="hint">当前吧的<b>删贴+封禁</b>记录。锁定后可在结果区按操作类型/吧务/被处理人再细分。也可在「概览」点吧务名直接锁定。</p>
   </section>
   <section class="panel" id="p-user">
     <form class="form" data-form="user">
@@ -731,7 +737,7 @@ function switchTab(name){
 $$(".tab").forEach(tab=>tab.onclick=()=>{
   const name=tab.dataset.tab;
   switchTab(name);
-  if(name==="logs" && currentFname) runLogs({});
+  if(name==="logs" && currentFname){ $("#logscope").value="whole"; syncScope(); runLogs({}); }
 });
 
 async function enterBar(){
@@ -751,6 +757,9 @@ async function enterBar(){
 }
 function renderOverview(d){
   const f=d.forum, n=x=>Number(x||0).toLocaleString();
+  // 吧务名填进「锁定吧务」的可搜下拉（用 user_name 检索，显示名做备注）
+  const unames=[...new Set(d.bawu.flatMap(r=>r.users.map(u=>u.user_name||u.name)))].filter(Boolean);
+  $("#bawulist").innerHTML=unames.map(u=>`<option value="${esc(u)}">`).join("");
   const roles=d.bawu.map(r=>`<div class="brole"><div class="rt">${esc(r.role)}（${r.users.length}）</div><div class="bwrap">`+
     r.users.map(u=>`<span class="bchip" data-uname="${esc(u.user_name||u.name)}">${esc(u.name)}${u.level?`<span class="lv">Lv${u.level}</span>`:""}</span>`).join("")+`</div></div>`).join("");
   $("#overview").innerHTML=
@@ -760,12 +769,20 @@ function renderOverview(d){
 }
 $("#wsgo").onclick=enterBar;
 $("#wsbar").onkeydown=e=>{ if(e.key==="Enter")enterBar(); };
-// 点概览里的吧务名字 → 锁定该吧务（服务端只查 TA 的记录）
+// 点概览里的吧务名字 → 锁定该吧务（同步表单为「锁定吧务」并查询）
 $("#overview").addEventListener("click",e=>{
   const c=e.target.closest(".bchip"); if(!c)return;
   switchTab("logs");
+  $("#logscope").value="op"; $("#p-logs [name=op_user]").value=c.dataset.uname; syncScope();
   runLogs({op_user:c.dataset.uname});
 });
+// 查询方式切换：显隐对应输入
+function syncScope(){
+  const s=$("#logscope").value;
+  $(".sc-op").hidden = s!=="op";
+  $(".sc-target").hidden = s!=="target";
+}
+$("#logscope").onchange=syncScope;
 // 统一入口：处理记录查询（extra 可带 op_user 或 tieba_uid）
 function runLogs(extra){
   if(!currentFname){ showErr("请先在上方输入并「进入」一个贴吧"); $("#results").hidden=false; return; }
@@ -871,6 +888,12 @@ function applyView(){
 }
 
 function resetControls(){ query="";catFilter="";sortMode="new";logCatBy="op_type";page=1;$("#search").value="";$("#sortsel").value="new";$("#catby").value="op_type";$("#catfilter").value="";$("#catmenu").hidden=true; }
+// 锁定后，结果区默认的细分维度：锁吧务→按操作类型；锁被处理人→按吧务；全吧→按操作类型
+function defaultCatBy(meta){
+  if(!meta||view.formKind!=="logs")return;
+  logCatBy = meta.mode==="target" ? "op_user" : "op_type";
+  $("#catby").value=logCatBy;
+}
 
 // 逐行读取 NDJSON 流
 async function streamNDJSON(url,body,onChunk){
@@ -895,7 +918,7 @@ async function submit(formKind, body){
   if(cache.has(key)){
     const snap=cache.get(key);
     view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
-    resetControls(); $("#results").hidden=false; load(false); applyView();
+    resetControls(); defaultCatBy(snap.meta); $("#results").hidden=false; load(false); applyView();
     return;
   }
   view={rc:f.rc, formKind, meta:null, items:[], done:false};
@@ -905,7 +928,7 @@ async function submit(formKind, body){
   try{
     await streamNDJSON(f.url, body, chunk=>{
       if(token!==streamToken)return;
-      if(chunk.type==="head") view.meta=chunk.head;
+      if(chunk.type==="head"){ view.meta=chunk.head; defaultCatBy(chunk.head); }
       else if(chunk.type==="items"){ view.items.push(...chunk.items); applyView(); setLoad(view.items.length); }
       else if(chunk.type==="error") errMsg=chunk.error;
     });
@@ -923,8 +946,12 @@ $$(".form").forEach(form=>form.onsubmit=async e=>{
   new FormData(form).forEach((v,k)=>body[k]=form.elements[k].type==="number"?Number(v):v);
   const btn=$("button[type=submit]",form); btn.disabled=true;
   try{
-    if(kind==="logs") runLogs(body.tieba_uid?{tieba_uid:body.tieba_uid}:{});  // 处理记录走统一入口
-    else await submit(kind, body);
+    if(kind==="logs"){                       // 处理记录：按查询方式锁定
+      const s=body.scope;
+      if(s==="op"){ const op=(body.op_user||"").trim(); if(!op){showErr("请输入或选择要锁定的吧务名");return;} runLogs({op_user:op}); }
+      else if(s==="target"){ if(!body.tieba_uid){showErr("请输入被处理人主页 id");return;} runLogs({tieba_uid:body.tieba_uid}); }
+      else runLogs({});
+    } else await submit(kind, body);
   } finally{ btn.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
