@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""贴吧吧务小工具 —— 单文件版（后端 + 网页全在这一个文件里）。
+"""贴吧吧务管理台 —— 单文件版（后端 + 网页全在这一个文件里）。
 
 用法：
     python3 tieba_tool.py
@@ -9,11 +9,11 @@
 可自动登录；也可以在页面右上角手动填。STOKEN 必须用 .tieba.baidu.com
 域下的那个（.passport 域的会 302）。
 
-功能：
-    用户发言查询   回复 / 主题帖 / 全部，可按贴吧分类，附「查楼层」精确定位
-    关键字搜索     吧内按内容搜索，可按发帖人分类
-    吧务处理记录   全吧最近记录或指定用户，合并删贴+封禁，可按操作类型/吧务/被处理人分类（需 STOKEN）
-结果均支持流式加载、文本搜索、翻页、复制、下载 txt、导出网页。
+工作流：顶部输入要管理的贴吧名并「进入」，然后：
+    概览        吧信息 + 吧务列表（点某个吧务查 TA 的处理记录）
+    处理记录    全吧最近或指定用户，合并删贴+封禁，
+                可按操作类型/吧务/被处理人分类（需 STOKEN）
+结果支持流式加载、文本搜索、排序、翻页、复制、下载 txt、导出网页。
 """
 
 from __future__ import annotations
@@ -164,7 +164,8 @@ async def svc_overview(bduss="", stoken="", fname=None, **_):
             users = getattr(bawu, attr, []) or []
             if users:
                 roles.append({"role": label, "users": [
-                    {"name": _name(u), "user_id": u.user_id, "level": getattr(u, "level", 0)}
+                    {"name": _name(u), "user_name": u.user_name,
+                     "user_id": u.user_id, "level": getattr(u, "level", 0)}
                     for u in users]})
         return {
             "forum": {
@@ -179,84 +180,6 @@ async def svc_overview(bduss="", stoken="", fname=None, **_):
 
 # --- 流式接口（NDJSON）：逐页 yield，前端边收边渲染 ---
 # 每个 chunk 形如 {"type": "head"|"items"|"done", ...}
-
-async def stream_user(bduss="", stoken="", tieba_uid=None, max_pages=30, kind="posts", **_):
-    """kind: posts=回复 / threads=主题帖 / all=两者。"""
-    if tieba_uid is None:
-        raise ServiceError("请填写用户贴吧主页 id。")
-    if kind not in ("posts", "threads", "all"):
-        raise ServiceError("内容类型无效。")
-    max_pages = _cap_pages(max_pages)
-    async with _client(bduss, stoken) as client:
-        user = await _resolve_user(client, tieba_uid)
-        uid = user.user_id or user.portrait
-        if not uid:
-            raise ServiceError("未找到该用户，请确认主页 id。")
-        yield {"type": "head", "head": {
-            "tieba_uid": _to_int(tieba_uid, "主页 id"), "show_name": _name(user)}}
-        if kind in ("posts", "all"):
-            async for chunk in _stream_posts(client, uid, max_pages):
-                yield chunk
-        if kind in ("threads", "all"):
-            async for chunk in _stream_threads(client, uid, max_pages):
-                yield chunk
-        yield {"type": "done"}
-
-
-async def _stream_posts(client, uid, max_pages):
-    fcache, pn = {}, 1
-    while pn <= max_pages:
-        up = _check(await client.get_user_posts(uid, pn), "获取用户回复")
-        if not up.objs:
-            break
-        items = []
-        for group in up.objs:
-            fid = group.fid
-            if fid not in fcache:
-                fcache[fid] = str(_check(await client.get_fname(fid), "解析贴吧名"))
-            for r in group.objs:
-                items.append({
-                    "kind": "reply",
-                    "fname": fcache[fid],
-                    "tid": r.tid,
-                    "pid": r.pid,
-                    "link": f"https://tieba.baidu.com/p/{r.tid}?pid={r.pid}&cid=0#{r.pid}",
-                    "time": _fmt_time(r.create_time),
-                    "ts": r.create_time,
-                    "text": r.text,
-                    "is_comment": bool(getattr(r, "is_comment", False)),
-                })
-        if items:
-            yield {"type": "items", "items": items}
-        pn += 1
-
-
-async def _stream_threads(client, uid, max_pages):
-    pn = 1
-    while pn <= max_pages:
-        ut = _check(await client.get_user_threads(uid, pn), "获取用户主题帖")
-        if not ut.objs:
-            break
-        items = [{
-            "kind": "thread",
-            "fname": t.fname,
-            "tid": t.tid,
-            "pid": t.pid,
-            "link": f"https://tieba.baidu.com/p/{t.tid}",
-            "time": _fmt_time(t.create_time),
-            "ts": t.create_time,
-            "title": t.title,
-            "text": t.text,
-            "reply_num": t.reply_num,
-            "view_num": t.view_num,
-            "is_comment": False,
-        } for t in ut.objs]
-        if items:
-            yield {"type": "items", "items": items}
-        if not getattr(ut, "has_more", False):
-            break
-        pn += 1
-
 
 async def _resolve_names(client, portraits):
     """并发解析 portrait -> 用户名（限流，失败留空）。"""
@@ -361,94 +284,6 @@ async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages
         yield {"type": "done"}
 
 
-async def stream_search(bduss="", stoken="", fname=None, query=None, max_pages=30, only_thread=False, **_):
-    """吧内关键字搜索。按内容检索，能查到隐藏用户的公开发言。"""
-    if not fname or not query:
-        raise ServiceError("请填写贴吧名和关键字。")
-    max_pages = _cap_pages(max_pages)
-    only_thread = bool(only_thread)
-    async with _client(bduss, stoken) as client:
-        yield {"type": "head", "head": {"fname": fname, "query": query}}
-        pn = 1
-        while pn <= max_pages:
-            res = _check(
-                await client.search_exact(fname, query, pn, only_thread=only_thread),
-                "搜索",
-            )
-            items = [{
-                "kind": "search",
-                "fname": x.fname or fname,
-                "tid": x.tid,
-                "pid": x.pid,
-                "link": f"https://tieba.baidu.com/p/{x.tid}?pid={x.pid}&cid=0#{x.pid}",
-                "time": _fmt_time(x.create_time),
-                "ts": x.create_time,
-                "title": x.title,
-                "text": x.text,
-                "user": x.show_name,
-                "is_comment": bool(x.is_comment),
-            } for x in res.objs]
-            if items:
-                yield {"type": "items", "items": items}
-            if not getattr(res, "has_more", False):
-                break
-            pn += 1
-        yield {"type": "done"}
-
-
-async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, max_pages=50, **_):
-    """按需定位一条回复/楼中楼在第几楼、第几页，并给出可精确跳转的链接。
-
-    楼层号不在搜索类接口的返回里，只能回帖里逐页扫描匹配 pid，故设扫描上限。
-    """
-    if tid is None or pid is None:
-        raise ServiceError("缺少 tid/pid。")
-    tid, pid = _to_int(tid, "tid"), _to_int(pid, "pid")
-    max_pages = min(_to_int(max_pages, "翻页数"), 50)  # 楼层页扫描上限，避免深帖跑太久
-    async with _client(bduss, stoken) as client:
-        deep_floors = []  # 楼中楼数超过内联的楼层，第一遍没命中时再深挖
-        pn = 1
-        while pn <= max_pages:
-            # 内联抓每层前 50 条楼中楼，覆盖绝大多数情况
-            posts = _check(
-                await client.get_posts(tid, pn, rn=30, with_comments=True, comment_rn=50),
-                "定位楼层",
-            )
-            for post in posts.objs:
-                if not is_comment and post.pid == pid:
-                    return {"found": True, "floor": post.floor, "page": pn,
-                            "url": f"https://tieba.baidu.com/p/{tid}?pid={pid}&cid=0#{pid}"}
-                if is_comment:
-                    for cm in post.comments:
-                        if cm.pid == pid:
-                            return {"found": True, "floor": post.floor, "page": pn,
-                                    "url": f"https://tieba.baidu.com/p/{tid}?pid={post.pid}&cid={pid}#{pid}"}
-                    if post.reply_num > len(post.comments):
-                        deep_floors.append((pn, post.pid, post.floor))
-            if not posts.has_more:
-                break
-            pn += 1
-
-        # 第二遍（仅楼中楼）：对楼中楼很多的楼层逐页翻 get_comments 深挖，带请求预算
-        if is_comment:
-            budget = 40
-            for fpage, ppid, floor in deep_floors:
-                cpn = 1
-                while cpn <= 200 and budget > 0:
-                    budget -= 1
-                    cs = _check(await client.get_comments(tid, ppid, cpn), "定位楼中楼")
-                    for cm in cs.objs:
-                        if cm.pid == pid:
-                            return {"found": True, "floor": floor, "page": fpage,
-                                    "url": f"https://tieba.baidu.com/p/{tid}?pid={ppid}&cid={pid}#{pid}"}
-                    if not cs.has_more:
-                        break
-                    cpn += 1
-                if budget <= 0:
-                    break
-        return {"found": False, "scanned": pn}
-
-
 def load_defaults() -> dict:
     """默认凭证来源（优先级：环境变量 > 本地 secret.py）。
 
@@ -472,15 +307,12 @@ DEFAULTS = load_defaults()
 # 普通接口：返回完整 JSON {"data": ...}
 ROUTES = {
     "/api/me": svc_me,
-    "/api/locate": svc_locate,
     "/api/overview": svc_overview,
 }
 
 # 流式接口：NDJSON，逐页 yield chunk
 STREAM_ROUTES = {
-    "/api/user-posts": stream_user,
     "/api/postlogs": stream_logs,
-    "/api/search": stream_search,
 }
 
 
@@ -719,8 +551,6 @@ main{max-width:960px;margin:0 auto;padding:24px}
 <nav class="tabs">
   <button class="tab active" data-tab="overview">概览</button>
   <button class="tab" data-tab="logs">处理记录</button>
-  <button class="tab" data-tab="search">关键字搜索</button>
-  <button class="tab" data-tab="user">用户发言</button>
 </nav>
 <main>
   <section class="panel active" id="p-overview">
@@ -733,24 +563,6 @@ main{max-width:960px;margin:0 auto;padding:24px}
       <button type="submit">查询记录</button>
     </form>
     <p class="hint">当前吧的<b>删贴+封禁</b>记录。留空=全吧最近（可按操作类型/吧务/被处理人分类）；填 id=只看该用户。</p>
-  </section>
-  <section class="panel" id="p-search">
-    <form class="form" data-form="search">
-      <label>关键字<input name="query" type="text" required placeholder="要搜索的词"></label>
-      <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
-      <label class="chk"><input name="only_thread" type="checkbox"> 只看主题帖</label>
-      <button type="submit">搜索</button>
-    </form>
-    <p class="hint">在当前吧内按内容搜索帖子/回复，能查到隐藏用户的公开发言。</p>
-  </section>
-  <section class="panel" id="p-user">
-    <form class="form" data-form="user">
-      <label>用户贴吧主页 id<input name="tieba_uid" type="number" class="no-spin" required placeholder="个人主页链接中的数字"></label>
-      <label>内容<select name="kind"><option value="all">全部</option><option value="posts">回复</option><option value="threads">主题帖</option></select></label>
-      <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
-      <button type="submit">查询</button>
-    </form>
-    <p class="hint">查某用户跨吧的发言（回复+主题帖），不限于当前管理的吧。</p>
   </section>
   <section class="results" id="results" hidden>
     <div class="rhead">
@@ -838,7 +650,7 @@ async function enterBar(){
 function renderOverview(d){
   const f=d.forum, n=x=>Number(x||0).toLocaleString();
   const roles=d.bawu.map(r=>`<div class="brole"><div class="rt">${esc(r.role)}（${r.users.length}）</div><div class="bwrap">`+
-    r.users.map(u=>`<span class="bchip" data-name="${esc(u.name)}">${esc(u.name)}${u.level?`<span class="lv">Lv${u.level}</span>`:""}</span>`).join("")+`</div></div>`).join("");
+    r.users.map(u=>`<span class="bchip" data-uname="${esc(u.user_name||u.name)}">${esc(u.name)}${u.level?`<span class="lv">Lv${u.level}</span>`:""}</span>`).join("")+`</div></div>`).join("");
   $("#overview").innerHTML=
     `<div class="fcard"><h2>${esc(f.fname)}</h2><div class="muted">${esc(f.slogan||"")}</div>`+
     `<div class="fstat"><span>关注 <b>${n(f.member_num)}</b></span><span>主题帖 <b>${n(f.thread_num)}</b></span><span>回复 <b>${n(f.post_num)}</b></span><span>吧务 <b>${d.bawu_total}</b></span></div></div>`+
@@ -848,7 +660,7 @@ $("#wsgo").onclick=enterBar;
 $("#wsbar").onkeydown=e=>{ if(e.key==="Enter")enterBar(); };
 $("#overview").addEventListener("click",e=>{
   const c=e.target.closest(".bchip"); if(!c)return;
-  pendingLogFilter={by:"op_user", val:c.dataset.name};
+  pendingLogFilter={by:"op_user", val:c.dataset.uname};
   switchTab("logs");
   const form=$("#p-logs form");
   form.requestSubmit?form.requestSubmit():form.dispatchEvent(new Event("submit",{cancelable:true}));
@@ -865,21 +677,11 @@ function applyPending(){
 function setBody(h){$("#rbody").innerHTML=h}
 let view=null, page=1, per=50, query="", catFilter="", sortMode="new", logCatBy="op_type", streamToken=0;
 const cache=new Map();  // 结果缓存：同一查询秒开
-const SORTABLE={user:1, search:1, logs:1};             // 可按时间排序的视图
-function catField(){const k=view.formKind;return k==="user"?"fname":k==="search"?"user":k==="logs"?logCatBy:null;}
-function catLabelText(){const k=view.formKind;
-  if(k==="user")return "全部吧"; if(k==="search")return "全部发帖人";
-  return logCatBy==="op_type"?"全部操作":logCatBy==="op_user"?"全部吧务":"全部被处理人";}
+const SORTABLE={logs:1};             // 可按时间排序的视图
+function catField(){return view.formKind==="logs"?logCatBy:null;}
+function catLabelText(){return logCatBy==="op_type"?"全部操作":logCatBy==="op_user"?"全部吧务":"全部被处理人";}
 
 const RENDER={
-  user:{
-    empty:"无内容：查“回复”为空可改选“主题帖”或“全部”；也可能对方未公开发言，或主页 id 有误。",
-    head:m=>`<b>${esc(m.show_name)}</b> · 主页id ${m.tieba_uid}`,
-    match:r=>r.fname+" "+(r.text||"")+" "+(r.title||""),
-    itemHTML:r=> r.kind==="thread"
-      ? `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="spacer"></span><span>${esc(r.time)}</span><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">帖子 ↗</a></div><div class="rtext"><b>${esc(r.title)}</b></div><div class="stats">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
-      : `<div class="row"><div class="meta"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="spacer"></span><span>${esc(r.time)}</span><button class="mini locbtn" data-tid="${r.tid}" data-pid="${r.pid}" data-c="${r.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(r.link)}" target="_blank" rel="noopener">原帖 ↗</a></div><div class="rtext">${esc(r.text)}</div></div>`,
-  },
   logs:{
     empty:"无吧务处理记录",
     head:m=> m.whole ? `最近处理记录 · 吧 <b>${esc(m.fname)}</b>` : `被处理人 <b>${esc(m.target)}</b> · 吧 ${esc(m.fname)}`,
@@ -892,16 +694,8 @@ const RENDER={
         : `<div class="row">${meta}<div class="ltitle">${esc(x.title||"")}</div><div class="ltext">${esc(x.text||"")}</div></div>`;
     },
   },
-  search:{
-    empty:"没有搜到内容",
-    head:m=>`吧 <b>${esc(m.fname)}</b> · 关键字 “${esc(m.query)}”`,
-    match:x=>x.fname+" "+(x.title||"")+" "+(x.text||"")+" "+(x.user||""),
-    itemHTML:x=>`<div class="row"><div class="meta"><span class="chip">${esc(x.fname)}</span>${x.is_comment?'<span class="tag">楼中楼</span>':""}${x.user?`<span>${esc(x.user)}</span>`:""}<span class="spacer"></span><span>${esc(x.time)}</span><button class="mini locbtn" data-tid="${x.tid}" data-pid="${x.pid}" data-c="${x.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(x.link)}" target="_blank" rel="noopener">原帖 ↗</a></div>${x.title?`<div class="ltitle">${esc(x.title)}</div>`:""}<div class="rtext">${esc(x.text)}</div></div>`,
-  },
 };
 const FLOW={
-  user:  {url:"/api/user-posts", rc:"user", name:"user_posts.txt"},
-  search:{url:"/api/search", rc:"search", name:"search.txt"},
   logs:  {url:"/api/postlogs", rc:"logs", name:"records.txt"},
 };
 
@@ -909,22 +703,19 @@ function catVal(it,field){ return it[field]||"(空)"; }
 let catOptions=[], catTotal=0;   // 当前分类选项 [{name,count}]
 function updateCatFilter(){
   // 分类可搜索下拉：用户发言→按吧名（含回复/主题帖分计），搜索→按发帖人，吧务记录→按吧务/被处理人
-  $("#catby").hidden = view.formKind!=="logs";   // 吧务记录才显示“按吧务/被处理人”切换
+  $("#catby").hidden = view.formKind!=="logs";   // 处理记录才显示“按操作/吧务/被处理人”切换
   const box=$("#catbox"), field=catField();
   const names=field?[...new Set(view.items.map(it=>catVal(it,field)))]:[];
   if(!field||names.length<2){ box.hidden=true; $("#catmenu").hidden=true; catOptions=[]; return; }
   const agg={};
-  view.items.forEach(it=>{ const k=catVal(it,field); const a=agg[k]||(agg[k]={count:0,reply:0,thread:0});
-    a.count++; if(it.kind==="thread")a.thread++; else a.reply++; });
-  catOptions=Object.keys(agg).sort((a,b)=>agg[b].count-agg[a].count).map(n=>({name:n,...agg[n]}));
+  view.items.forEach(it=>{ const k=catVal(it,field); agg[k]=(agg[k]||0)+1; });
+  catOptions=Object.keys(agg).sort((a,b)=>agg[b]-agg[a]).map(n=>({name:n,count:agg[n]}));
   catTotal=view.items.length;
   $("#catfilter").placeholder=`${catLabelText()}（${catTotal}），可搜`;
   box.hidden=false;
   if(!$("#catmenu").hidden) renderCatMenu($("#catfilter").value);  // 菜单开着就刷新
 }
-function catCnt(o){
-  return view.formKind==="user" ? `${o.reply}回·${o.thread}帖` : `${o.count}`;
-}
+function catCnt(o){ return `${o.count}`; }
 function renderCatMenu(text){
   const t=(text||"").trim().toLowerCase();
   const opts=catOptions.filter(o=>o.name.toLowerCase().includes(t));
@@ -1016,25 +807,10 @@ $$(".form").forEach(form=>form.onsubmit=async e=>{
   if(!cred.bduss){showErr("请先在右上角填写 BDUSS 并登录");return;}
   const kind=form.dataset.form, body={};
   new FormData(form).forEach((v,k)=>body[k]=form.elements[k].type==="number"?Number(v):v);
-  if(kind==="logs"||kind==="search"){
-    if(!currentFname){showErr("请先在上方输入并「进入」一个贴吧");return;}
-    body.fname=currentFname;
-  }
+  if(!currentFname){showErr("请先在上方输入并「进入」一个贴吧");return;}
+  body.fname=currentFname;
   const btn=$("button[type=submit]",form); btn.disabled=true;
   try{ await submit(kind, body); } finally{ btn.disabled=false; }
-});
-
-// 「查楼层」按需定位（事件委托，#rbody 常驻）
-$("#rbody").addEventListener("click",async e=>{
-  const b=e.target.closest(".locbtn"); if(!b||b.dataset.done)return;
-  b.disabled=true; b.textContent="查询中…";
-  try{
-    const res=await api("/api/locate",{tid:Number(b.dataset.tid),pid:Number(b.dataset.pid),is_comment:b.dataset.c==="1"});
-    if(res.found){
-      b.textContent=`第 ${res.floor} 楼 · 第 ${res.page} 页`; b.classList.add("hit"); b.dataset.done=1;
-      const a=b.parentElement.querySelector("a.orig"); if(a)a.href=res.url;
-    }else{ b.textContent="未定位到"; b.title="帖子里找不到这条：可能已被删除/折叠，或在扫描范围外（超 50 页的深帖）"; b.disabled=false; }
-  }catch(err){ b.textContent="查询失败"; b.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
 // 分类可搜索下拉
@@ -1050,17 +826,6 @@ $("#per").onchange=e=>{per=Number(e.target.value);page=1;applyView()};
 $("#jump").onchange=e=>{const n=Number(e.target.value); if(n>=1){page=n;applyView();$("#rbody").scrollTop=0;} e.target.value="";};
 
 // 导出文本
-function userText(d){
-  let L=[`查询用户: ${d.user.show_name} (主页id=${d.user.tieba_uid})`,""];
-  d.replies.forEach(r=>{
-    if(r.kind==="thread"){
-      L.push(`[主题帖] 贴吧: ${r.fname} 时间: ${r.time} 回复:${r.reply_num} 浏览:${r.view_num}`,`   ${r.title}`,`   ${r.link}`);
-    }else{
-      L.push(`贴吧名: ${r.fname} 链接: ${r.link} 回复时间: ${r.time}${r.is_comment?"（楼中楼）":""}`,`   ${r.text}`);
-    }
-  });
-  L.push("",`共 ${d.replies.length} 条`);return L.join("\n")+"\n";
-}
 function logsText(d){
   let L=[`吧务处理记录 · 吧: ${d.fname}`+(d.whole?"（全吧最近）":` · 被处理人: ${d.target}`),""];
   if(!d.logs.length)L.push("（无记录）");
@@ -1071,24 +836,11 @@ function logsText(d){
   });
   L.push("",`共 ${d.logs.length} 条`);return L.join("\n")+"\n";
 }
-function searchText(d){
-  let L=[`吧: ${d.fname}  关键字: ${d.query}`,""];
-  d.items.forEach(x=>{
-    L.push(`[${x.is_comment?"楼中楼":"帖"}] ${x.user||""} ${x.time}  ${x.link}`);
-    if(x.title)L.push(`   ${x.title}`);
-    L.push(`   ${x.text}`);
-  });
-  L.push("",`共 ${d.items.length} 条`);return L.join("\n")+"\n";
-}
-
 // 由当前累积结果重建导出文本
 function currentText(){
   if(!view||!view.meta)return "";
-  const k=view.formKind, items=view.items, m=view.meta;
-  const d = k==="user"?{user:m,replies:items}
-          : k==="search"?{fname:m.fname,query:m.query,items:items}
-          : {target:m.target,fname:m.fname,whole:m.whole,logs:items};
-  return ({user:userText,search:searchText,logs:logsText})[k](d);
+  const m=view.meta;
+  return logsText({target:m.target,fname:m.fname,whole:m.whole,logs:view.items});
 }
 
 // 导出为独立网页（自包含，可直接发给别人用浏览器打开）
@@ -1104,29 +856,15 @@ h1{font-size:20px;margin:0 0 4px}.sub{color:#888;font-size:13px;margin-bottom:18
 .ttl{font-weight:600;margin:2px 0}.st{color:#999;font-size:12px}a{color:#2563eb;text-decoration:none}a:hover{text-decoration:underline}`;
 function buildHTML(){
   if(!view||!view.meta)return "";
-  const k=view.formKind, m=view.meta, items=view.items;
-  const A=(u,t)=>`<a href="${esc(u)}" target="_blank" rel="noopener">${t}</a>`;
-  let title="结果", sub="", rows="";
-  if(k==="user"){
-    title=`${esc(m.show_name)} 的发言`;
-    sub=`主页id ${m.tieba_uid} · 共 ${items.length} 条`;
-    rows=items.map(r=> r.kind==="thread"
-      ? `<div class="card"><div class="hd"><span class="chip">${esc(r.fname)}</span><span class="tag2">主题帖</span><span class="t">${esc(r.time)}</span>${A(r.link,"帖子↗")}</div><div class="ttl">${esc(r.title)}</div><div class="st">回复 ${r.reply_num} · 浏览 ${r.view_num}</div></div>`
-      : `<div class="card"><div class="hd"><span class="chip">${esc(r.fname)}</span>${r.is_comment?'<span class="tag">楼中楼</span>':""}<span class="t">${esc(r.time)}</span>${A(r.link,"原帖↗")}</div><div class="tx">${esc(r.text)}</div></div>`).join("");
-  }else if(k==="search"){
-    title=`「${esc(m.query)}」· ${esc(m.fname)}`;
-    sub=`关键字搜索 · 共 ${items.length} 条`;
-    rows=items.map(x=>`<div class="card"><div class="hd"><span class="chip">${esc(x.fname)}</span>${x.is_comment?'<span class="tag">楼中楼</span>':""}${x.user?`<b>${esc(x.user)}</b>`:""}<span class="t">${esc(x.time)}</span>${A(x.link,"原帖↗")}</div>${x.title?`<div class="ttl">${esc(x.title)}</div>`:""}<div class="tx">${esc(x.text)}</div></div>`).join("");
-  }else{
-    title=m.whole?`${esc(m.fname)} 吧务处理记录`:`${esc(m.target)} 的吧务处理记录`;
-    sub=`吧 ${esc(m.fname)}${m.whole?"（全吧最近）":""} · 共 ${items.length} 条`;
-    rows=items.map(x=>{
-      const ban=x.duration!==undefined;
-      const hd=`<div class="hd"><span class="optag">${esc(x.op_type)}</span>吧务 ${esc(x.op_user)}${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}${ban&&x.duration?`<span class="tag">${x.duration}天</span>`:""}<span class="t">${esc(x.op_time)}</span></div>`;
-      return ban?`<div class="card">${hd}</div>`
-                :`<div class="card">${hd}<div class="ttl">${esc(x.title||"")}</div><div class="tx">${esc(x.text||"")}</div></div>`;
-    }).join("");
-  }
+  const m=view.meta, items=view.items;
+  const title=m.whole?`${esc(m.fname)} 吧务处理记录`:`${esc(m.target)} 的吧务处理记录`;
+  const sub=`吧 ${esc(m.fname)}${m.whole?"（全吧最近）":""} · 共 ${items.length} 条`;
+  const rows=items.map(x=>{
+    const ban=x.duration!==undefined;
+    const hd=`<div class="hd"><span class="optag">${esc(x.op_type)}</span>吧务 ${esc(x.op_user)}${x.target?`<span class="chip">被处理 ${esc(x.target)}</span>`:""}${ban&&x.duration?`<span class="tag">${x.duration}天</span>`:""}<span class="t">${esc(x.op_time)}</span></div>`;
+    return ban?`<div class="card">${hd}</div>`
+              :`<div class="card">${hd}<div class="ttl">${esc(x.title||"")}</div><div class="tx">${esc(x.text||"")}</div></div>`;
+  }).join("");
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${EXPORT_CSS}</style></head><body><h1>${title}</h1><div class="sub">${sub} · 导出于 ${new Date().toLocaleString()}</div>${rows||'<div class="st">无内容</div>'}</body></html>`;
 }
 
