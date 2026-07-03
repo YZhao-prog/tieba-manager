@@ -643,11 +643,11 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="panel" id="p-user">
     <form class="form" data-form="user">
       <label>用户贴吧主页 id<input name="tieba_uid" type="number" class="no-spin" required placeholder="个人主页链接中的数字"></label>
-      <label>内容<select name="kind"><option value="posts">回复</option><option value="threads">主题帖</option><option value="all">全部</option></select></label>
+      <label>内容<select name="kind"><option value="all">全部</option><option value="posts">回复</option><option value="threads">主题帖</option></select></label>
       <label>最多翻页<input name="max_pages" type="number" value="30" min="1"></label>
       <button type="submit">查询</button>
     </form>
-    <p class="hint">回复=TA 的跟帖与楼中楼；主题帖=TA 自己发的帖；全部=两者合并按时间排序。</p>
+    <p class="hint">默认查“全部”（回复+主题帖，按时间合并），吧名分类会把主题帖一起算进来。也可单选“回复”或“主题帖”。</p>
   </section>
   <section class="panel" id="p-search">
     <form class="form" data-form="search">
