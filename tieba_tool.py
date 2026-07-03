@@ -295,6 +295,41 @@ async def stream_logs(bduss="", stoken="", fname=None, tieba_uid=None, max_pages
         yield {"type": "done"}
 
 
+async def stream_search(bduss="", stoken="", fname=None, query=None, max_pages=30, only_thread=False, **_):
+    """吧内关键字搜索。按内容检索，能查到隐藏用户的公开发言。"""
+    if not fname or not query:
+        raise ServiceError("请填写贴吧名和关键字。")
+    max_pages = _cap_pages(max_pages)
+    only_thread = bool(only_thread)
+    async with _client(bduss, stoken) as client:
+        yield {"type": "head", "head": {"fname": fname, "query": query}}
+        pn = 1
+        while pn <= max_pages:
+            res = _check(
+                await client.search_exact(fname, query, pn, only_thread=only_thread),
+                "搜索",
+            )
+            items = [{
+                "kind": "search",
+                "fname": x.fname or fname,
+                "tid": x.tid,
+                "pid": x.pid,
+                "link": f"https://tieba.baidu.com/p/{x.tid}?pid={x.pid}&cid=0#{x.pid}",
+                "time": _fmt_time(x.create_time),
+                "ts": x.create_time,
+                "title": x.title,
+                "text": x.text,
+                "user": x.show_name,
+                "is_comment": bool(x.is_comment),
+            } for x in res.objs]
+            if items:
+                yield {"type": "items", "items": items}
+            if not getattr(res, "has_more", False):
+                break
+            pn += 1
+        yield {"type": "done"}
+
+
 async def svc_locate(bduss="", stoken="", tid=None, pid=None, is_comment=False, max_pages=50, **_):
     """按需定位一条回复/楼中楼在第几楼、第几页，并给出可精确跳转的链接。
 
@@ -379,6 +414,7 @@ STREAM_ROUTES = {
     "/api/thread": stream_thread,
     "/api/user-posts": stream_user,
     "/api/postlogs": stream_logs,
+    "/api/search": stream_search,
 }
 
 
@@ -566,6 +602,10 @@ main{max-width:960px;margin:0 auto;padding:24px}
 @keyframes s{to{transform:rotate(360deg)}}
 .search{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 12px;font-size:13px;width:160px}
 .search:focus{outline:none;border-color:var(--accent)}
+.barsel{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:7px 10px;font-size:13px;max-width:180px}
+.barsel:focus{outline:none;border-color:var(--accent)}
+.form .chk{flex-direction:row;align-items:center;gap:7px;flex:0 0 auto;cursor:pointer}
+.form .chk input{width:auto}
 .pager{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 18px;border-top:1px solid var(--border);background:var(--surface2);font-size:13px;color:var(--muted)}
 .pager button:disabled{opacity:.4;cursor:not-allowed}
 .pager select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:5px 8px;font-size:13px}
@@ -586,6 +626,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
 <nav class="tabs">
   <button class="tab active" data-tab="thread">主题帖爬取</button>
   <button class="tab" data-tab="user">用户发言查询</button>
+  <button class="tab" data-tab="search">关键字搜索</button>
   <button class="tab" data-tab="logs">吧务处理记录</button>
 </nav>
 <main>
@@ -606,6 +647,16 @@ main{max-width:960px;margin:0 auto;padding:24px}
     </form>
     <p class="hint">回复=TA 的跟帖与楼中楼；主题帖=TA 自己发的帖；全部=两者合并按时间排序。</p>
   </section>
+  <section class="panel" id="p-search">
+    <form class="form" data-form="search">
+      <label>贴吧名（带“吧”字）<input name="fname" type="text" required placeholder="如 yy小说吧"></label>
+      <label>关键字<input name="query" type="text" required placeholder="要搜索的词"></label>
+      <label>最多翻页<input name="max_pages" type="number" value="10" min="1"></label>
+      <label class="chk"><input name="only_thread" type="checkbox"> 只看主题帖</label>
+      <button type="submit">搜索</button>
+    </form>
+    <p class="hint">在指定吧内按内容搜索帖子/回复。能查到隐藏用户在该吧的公开发言。</p>
+  </section>
   <section class="panel" id="p-logs">
     <form class="form" data-form="logs">
       <label>贴吧名（带“吧”字）<input name="fname" type="text" required placeholder="如 yy小说吧"></label>
@@ -618,7 +669,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
+      <div class="ract"><select id="barfilter" class="barsel" hidden></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
     </div>
     <div id="rbody"></div>
     <div class="pager" id="pager" hidden>
@@ -669,12 +720,12 @@ $$(".tab").forEach(tab=>tab.onclick=()=>{
   $$(".tab").forEach(t=>t.classList.remove("active"));
   $$(".panel").forEach(p=>p.classList.remove("active"));
   tab.classList.add("active");$("#p-"+tab.dataset.tab).classList.add("active");
-  streamToken++;view=null;hideRes();   // 使进行中的流失效
+  streamToken++;view=null;barFilter="";hideRes();   // 使进行中的流失效
 });
 
 // ---- 渲染配置（流式累积；itemHTML/match/head/empty 与数据分离）----
 function setBody(h){$("#rbody").innerHTML=h}
-let view=null, page=1, per=50, query="", streamToken=0;
+let view=null, page=1, per=50, query="", barFilter="", streamToken=0;
 const cache=new Map();  // 结果缓存：同一查询秒开
 
 const RENDER={
@@ -702,19 +753,40 @@ const RENDER={
     match:x=>x.title+" "+x.text+" "+x.op_user,
     itemHTML:x=>`<div class="row"><div class="meta"><span class="optag">${esc(x.op_type)}</span><span>操作人 ${esc(x.op_user)}</span><span class="spacer"></span><span>${esc(x.op_time)}</span></div><div class="ltitle">${esc(x.title)}</div><div class="ltext">${esc(x.text)}</div></div>`,
   },
+  search:{
+    empty:"没有搜到内容",
+    head:m=>`吧 <b>${esc(m.fname)}</b> · 关键字 “${esc(m.query)}”`,
+    match:x=>x.fname+" "+(x.title||"")+" "+(x.text||"")+" "+(x.user||""),
+    itemHTML:x=>`<div class="row"><div class="meta"><span class="chip">${esc(x.fname)}</span>${x.is_comment?'<span class="tag">楼中楼</span>':""}${x.user?`<span>${esc(x.user)}</span>`:""}<span class="spacer"></span><span>${esc(x.time)}</span><button class="mini locbtn" data-tid="${x.tid}" data-pid="${x.pid}" data-c="${x.is_comment?1:0}">查楼层</button><a class="orig" href="${esc(x.link)}" target="_blank" rel="noopener">原帖 ↗</a></div>${x.title?`<div class="ltitle">${esc(x.title)}</div>`:""}<div class="rtext">${esc(x.text)}</div></div>`,
+  },
 };
 const FLOW={
   thread:{url:"/api/thread", rc:"thread", name:"thread.txt", sort:false},
   user:  {url:"/api/user-posts", rc:"user", name:"user_posts.txt", sort:true},
+  search:{url:"/api/search", rc:"search", name:"search.txt", sort:false},
   logs:  {url:"/api/postlogs", rc:"logs", name:"records.txt", sort:false},
 };
 
+function updateBarFilter(){
+  // 贴吧分类：仅“用户发言”视图，且结果含多个吧时显示
+  const bf=$("#barfilter");
+  const names=[...new Set(view.items.map(it=>it.fname))];
+  if(view.formKind!=="user"||names.length<2){ bf.hidden=true; barFilter=""; return; }
+  const counts={}; view.items.forEach(it=>counts[it.fname]=(counts[it.fname]||0)+1);
+  names.sort((a,b)=>counts[b]-counts[a]);
+  bf.innerHTML=`<option value="">全部吧 (${view.items.length})</option>`+
+    names.map(n=>`<option value="${esc(n)}">${esc(n)} (${counts[n]})</option>`).join("");
+  if(!counts[barFilter]) barFilter="";      // 选中的吧在增量中还没出现/消失
+  bf.value=barFilter; bf.hidden=false;
+}
 function applyView(){
   if(!view)return;
   const rc=RENDER[view.rc];
+  updateBarFilter();
+  let base=barFilter?view.items.filter(it=>it.fname===barFilter):view.items;
   const q=query.trim().toLowerCase();
-  const items=q?view.items.filter(it=>rc.match(it).toLowerCase().includes(q)):view.items;
-  const total=view.items.length, shown=items.length, pages=Math.max(1,Math.ceil(shown/per));
+  const items=q?base.filter(it=>rc.match(it).toLowerCase().includes(q)):base;
+  const total=base.length, shown=items.length, pages=Math.max(1,Math.ceil(shown/per));
   if(page>pages)page=pages; if(page<1)page=1;
   const slice=items.slice((page-1)*per,page*per);
   const head=view.meta?rc.head(view.meta):"结果";
@@ -748,11 +820,11 @@ async function submit(formKind, body){
   if(cache.has(key)){
     const snap=cache.get(key);
     view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
-    query="";page=1;$("#search").value=""; $("#results").hidden=false; load(false); applyView();
+    query="";barFilter="";page=1;$("#search").value=""; $("#results").hidden=false; load(false); applyView();
     return;
   }
   view={rc:f.rc, formKind, meta:null, items:[], done:false};
-  query="";page=1;$("#search").value=""; $("#results").hidden=false; applyView();
+  query="";barFilter="";page=1;$("#search").value=""; $("#results").hidden=false; applyView();
   setLoad(0);
   let errMsg=null;
   try{
@@ -791,6 +863,7 @@ $("#rbody").addEventListener("click",async e=>{
   }catch(err){ b.textContent="查询失败"; b.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
+$("#barfilter").onchange=e=>{barFilter=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
 $("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
 $("#per").onchange=e=>{per=Number(e.target.value);page=1;applyView()};
@@ -821,6 +894,15 @@ function logsText(d){
   let L=[];d.logs.forEach(x=>L.push(`被处理人：${d.target}`,x.title,x.text,`${x.op_user} ${x.op_type} ${x.op_time}`,"==============="));
   return L.join("\n")+"\n";
 }
+function searchText(d){
+  let L=[`吧: ${d.fname}  关键字: ${d.query}`,""];
+  d.items.forEach(x=>{
+    L.push(`[${x.is_comment?"楼中楼":"帖"}] ${x.user||""} ${x.time}  ${x.link}`);
+    if(x.title)L.push(`   ${x.title}`);
+    L.push(`   ${x.text}`);
+  });
+  L.push("",`共 ${d.items.length} 条`);return L.join("\n")+"\n";
+}
 
 // 由当前累积结果重建导出文本
 function currentText(){
@@ -828,8 +910,9 @@ function currentText(){
   const k=view.formKind, items=view.items, m=view.meta;
   const d = k==="thread"?{thread:m,floors:items}
           : k==="user"?{user:m,replies:items}
+          : k==="search"?{fname:m.fname,query:m.query,items:items}
           : {target:m.target,fname:m.fname,logs:items};
-  return ({thread:threadText,user:userText,logs:logsText})[k](d);
+  return ({thread:threadText,user:userText,search:searchText,logs:logsText})[k](d);
 }
 
 // 结果区
