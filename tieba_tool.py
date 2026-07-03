@@ -787,7 +787,7 @@ $("#rbody").addEventListener("click",async e=>{
     if(res.found){
       b.textContent=`第 ${res.floor} 楼 · 第 ${res.page} 页`; b.classList.add("hit"); b.dataset.done=1;
       const a=b.parentElement.querySelector("a.orig"); if(a)a.href=res.url;
-    }else{ b.textContent="未定位到"; b.disabled=false; }
+    }else{ b.textContent="未定位到"; b.title="帖子里找不到这条：可能已被删除/折叠，或在扫描范围外（超 50 页的深帖）"; b.disabled=false; }
   }catch(err){ b.textContent="查询失败"; b.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
