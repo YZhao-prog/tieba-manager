@@ -669,7 +669,7 @@ main{max-width:960px;margin:0 auto;padding:24px}
   <section class="results" id="results" hidden>
     <div class="rhead">
       <div class="summary" id="summary"></div>
-      <div class="ract"><select id="barfilter" class="barsel" hidden></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
+      <div class="ract"><select id="catfilter" class="barsel" hidden></select><select id="sortsel" class="barsel" hidden><option value="new">时间新→旧</option><option value="old">时间旧→新</option></select><input id="search" class="search" placeholder="搜索文本…"><button class="ghost" id="copy">复制文本</button><button class="ghost" id="dl">下载 .txt</button></div>
     </div>
     <div id="rbody"></div>
     <div class="pager" id="pager" hidden>
@@ -720,13 +720,16 @@ $$(".tab").forEach(tab=>tab.onclick=()=>{
   $$(".tab").forEach(t=>t.classList.remove("active"));
   $$(".panel").forEach(p=>p.classList.remove("active"));
   tab.classList.add("active");$("#p-"+tab.dataset.tab).classList.add("active");
-  streamToken++;view=null;barFilter="";hideRes();   // 使进行中的流失效
+  streamToken++;view=null;catFilter="";sortMode="new";hideRes();   // 使进行中的流失效
 });
 
 // ---- 渲染配置（流式累积；itemHTML/match/head/empty 与数据分离）----
 function setBody(h){$("#rbody").innerHTML=h}
-let view=null, page=1, per=50, query="", barFilter="", streamToken=0;
+let view=null, page=1, per=50, query="", catFilter="", sortMode="new", streamToken=0;
 const cache=new Map();  // 结果缓存：同一查询秒开
+const CATFIELD={user:"fname", search:"user"};        // 分类依据
+const CATLABEL={user:"全部吧", search:"全部发帖人"};
+const SORTABLE={user:1, search:1};                    // 可按时间排序的视图
 
 const RENDER={
   thread:{
@@ -767,23 +770,31 @@ const FLOW={
   logs:  {url:"/api/postlogs", rc:"logs", name:"records.txt", sort:false},
 };
 
-function updateBarFilter(){
-  // 贴吧分类：仅“用户发言”视图，且结果含多个吧时显示
-  const bf=$("#barfilter");
-  const names=[...new Set(view.items.map(it=>it.fname))];
-  if(view.formKind!=="user"||names.length<2){ bf.hidden=true; barFilter=""; return; }
-  const counts={}; view.items.forEach(it=>counts[it.fname]=(counts[it.fname]||0)+1);
+function catVal(it,field){ return it[field]||"(空)"; }
+function updateCatFilter(){
+  // 分类下拉：用户发言→按贴吧，关键字搜索→按发帖人
+  const cf=$("#catfilter"), field=CATFIELD[view.formKind];
+  const names=field?[...new Set(view.items.map(it=>catVal(it,field)))]:[];
+  if(!field||names.length<2){ cf.hidden=true; catFilter=""; return; }
+  const counts={}; view.items.forEach(it=>counts[catVal(it,field)]=(counts[catVal(it,field)]||0)+1);
   names.sort((a,b)=>counts[b]-counts[a]);
-  bf.innerHTML=`<option value="">全部吧 (${view.items.length})</option>`+
+  cf.innerHTML=`<option value="">${CATLABEL[view.formKind]} (${view.items.length})</option>`+
     names.map(n=>`<option value="${esc(n)}">${esc(n)} (${counts[n]})</option>`).join("");
-  if(!counts[barFilter]) barFilter="";      // 选中的吧在增量中还没出现/消失
-  bf.value=barFilter; bf.hidden=false;
+  if(!counts[catFilter]) catFilter="";       // 选中项在增量中还没出现/消失
+  cf.value=catFilter; cf.hidden=false;
 }
 function applyView(){
   if(!view)return;
   const rc=RENDER[view.rc];
-  updateBarFilter();
-  let base=barFilter?view.items.filter(it=>it.fname===barFilter):view.items;
+  updateCatFilter();
+  // 排序（仅可排序视图）
+  let base=view.items.slice();
+  if(SORTABLE[view.formKind]){ base.sort((a,b)=> sortMode==="old" ? a.ts-b.ts : b.ts-a.ts); $("#sortsel").hidden=false; }
+  else $("#sortsel").hidden=true;
+  // 分类筛选
+  const field=CATFIELD[view.formKind];
+  if(field && catFilter) base=base.filter(it=>catVal(it,field)===catFilter);
+  // 文本搜索
   const q=query.trim().toLowerCase();
   const items=q?base.filter(it=>rc.match(it).toLowerCase().includes(q)):base;
   const total=base.length, shown=items.length, pages=Math.max(1,Math.ceil(shown/per));
@@ -796,6 +807,8 @@ function applyView(){
   if(shown>per){pager.hidden=false;$("#pageinfo").textContent=`第 ${page} / ${pages} 页`;$("#prev").disabled=page<=1;$("#next").disabled=page>=pages;}
   else pager.hidden=true;
 }
+
+function resetControls(){ query="";catFilter="";sortMode="new";page=1;$("#search").value="";$("#sortsel").value="new"; }
 
 // 逐行读取 NDJSON 流
 async function streamNDJSON(url,body,onChunk){
@@ -820,18 +833,18 @@ async function submit(formKind, body){
   if(cache.has(key)){
     const snap=cache.get(key);
     view={rc:f.rc, formKind, meta:snap.meta, items:snap.items.slice(), done:true};
-    query="";barFilter="";page=1;$("#search").value=""; $("#results").hidden=false; load(false); applyView();
+    resetControls(); $("#results").hidden=false; load(false); applyView();
     return;
   }
   view={rc:f.rc, formKind, meta:null, items:[], done:false};
-  query="";barFilter="";page=1;$("#search").value=""; $("#results").hidden=false; applyView();
+  resetControls(); $("#results").hidden=false; applyView();
   setLoad(0);
   let errMsg=null;
   try{
     await streamNDJSON(f.url, body, chunk=>{
       if(token!==streamToken)return;
       if(chunk.type==="head") view.meta=chunk.head;
-      else if(chunk.type==="items"){ view.items.push(...chunk.items); if(f.sort)view.items.sort((a,b)=>b.ts-a.ts); applyView(); setLoad(view.items.length); }
+      else if(chunk.type==="items"){ view.items.push(...chunk.items); applyView(); setLoad(view.items.length); }
       else if(chunk.type==="error") errMsg=chunk.error;
     });
   }catch(e){ if(token===streamToken) errMsg=e.message; }
@@ -863,7 +876,8 @@ $("#rbody").addEventListener("click",async e=>{
   }catch(err){ b.textContent="查询失败"; b.disabled=false; }
 });
 $("#search").oninput=e=>{query=e.target.value;page=1;applyView()};
-$("#barfilter").onchange=e=>{barFilter=e.target.value;page=1;applyView()};
+$("#catfilter").onchange=e=>{catFilter=e.target.value;page=1;applyView()};
+$("#sortsel").onchange=e=>{sortMode=e.target.value;page=1;applyView()};
 $("#prev").onclick=()=>{if(page>1){page--;applyView();$("#rbody").scrollTop=0}};
 $("#next").onclick=()=>{page++;applyView();$("#rbody").scrollTop=0};
 $("#per").onchange=e=>{per=Number(e.target.value);page=1;applyView()};
